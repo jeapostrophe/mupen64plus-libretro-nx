@@ -230,6 +230,20 @@ public:
 		return device_table;
 	}
 
+	// If set, create_device() obtains the VkDevice from this callback instead of calling
+	// vkCreateDevice itself. An external owner of the device - a libretro frontend using v2
+	// context negotiation - needs this so it can merge its own extensions, features and
+	// queues into the VkDeviceCreateInfo we assembled. Returns VK_NULL_HANDLE on failure.
+	// Must be set before init_device_from_instance().
+	using DeviceCreateWrapper = VkDevice (*)(VkPhysicalDevice gpu, void *opaque,
+	                                         const VkDeviceCreateInfo *create_info);
+
+	void set_device_create_wrapper(DeviceCreateWrapper wrapper, void *opaque)
+	{
+		device_create_wrapper = wrapper;
+		device_create_wrapper_opaque = opaque;
+	}
+
 	struct SystemHandles
 	{
 		Util::TimelineTraceFile *timeline_trace_file = nullptr;
@@ -267,6 +281,9 @@ private:
 
 	QueueInfo queue_info;
 	unsigned num_thread_indices = 1;
+
+	DeviceCreateWrapper device_create_wrapper = nullptr;
+	void *device_create_wrapper_opaque = nullptr;
 
 	bool create_instance(const char **instance_ext, uint32_t instance_ext_count, ContextCreationFlags flags);
 	bool create_device(VkPhysicalDevice gpu, VkSurfaceKHR surface, const char **required_device_extensions,

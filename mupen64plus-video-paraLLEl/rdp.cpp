@@ -435,11 +435,20 @@ void complete_frame()
 }
 }
 
-bool parallel_create_device(struct retro_vulkan_context *frontend_context, VkInstance instance, VkPhysicalDevice gpu,
-                            VkSurfaceKHR surface, PFN_vkGetInstanceProcAddr get_instance_proc_addr,
-                            const char **required_device_extensions, unsigned num_required_device_extensions,
-                            const char **required_device_layers, unsigned num_required_device_layers,
-                            const VkPhysicalDeviceFeatures *required_features)
+// Shared body of the v1 create_device and the v2 create_device2 entry points. In v2 the
+// VkDevice must come from the frontend's CreateDevice wrapper rather than from vkCreateDevice
+// ("Rather than call vkCreateDevice directly, a core must call the CreateDevice wrapper
+// provided with: VkDevice device = create_device_wrapper(gpu, opaque, &create_info);"), so the
+// frontend can merge its own extensions and PDF2 features into our create info. v2 requests no
+// extensions or features of us - the frontend adds what it needs inside the wrapper - so only
+// the v1 path ever has a required extension list.
+static bool parallel_create_device_impl(struct retro_vulkan_context *frontend_context, VkInstance instance,
+                                        VkPhysicalDevice gpu, VkSurfaceKHR surface,
+                                        PFN_vkGetInstanceProcAddr get_instance_proc_addr,
+                                        const char **required_device_extensions,
+                                        unsigned num_required_device_extensions,
+                                        const VkPhysicalDeviceFeatures *required_features,
+                                        retro_vulkan_create_device_wrapper_t create_device_wrapper, void *opaque)
 {
 	if (!Vulkan::Context::init_loader(get_instance_proc_addr))
 		return false;
@@ -455,6 +464,7 @@ bool parallel_create_device(struct retro_vulkan_context *frontend_context, VkIns
 	}
 
 	::RDP::context->set_system_handles(handles);
+	::RDP::context->set_device_create_wrapper(create_device_wrapper, opaque);
 
 	if (!::RDP::context->init_device_from_instance(
 				instance, gpu, surface, required_device_extensions, num_required_device_extensions,
@@ -474,6 +484,34 @@ bool parallel_create_device(struct retro_vulkan_context *frontend_context, VkIns
 	// Frontend owns the device.
 	::RDP::context->release_device();
 	return true;
+}
+
+bool parallel_create_device(struct retro_vulkan_context *frontend_context, VkInstance instance, VkPhysicalDevice gpu,
+                            VkSurfaceKHR surface, PFN_vkGetInstanceProcAddr get_instance_proc_addr,
+                            const char **required_device_extensions, unsigned num_required_device_extensions,
+                            const char **required_device_layers, unsigned num_required_device_layers,
+                            const VkPhysicalDeviceFeatures *required_features)
+{
+	return parallel_create_device_impl(frontend_context, instance, gpu, surface, get_instance_proc_addr,
+	                                   required_device_extensions, num_required_device_extensions,
+	                                   required_features, nullptr, nullptr);
+}
+
+bool parallel_create_device2(struct retro_vulkan_context *frontend_context, VkInstance instance, VkPhysicalDevice gpu,
+                             VkSurfaceKHR surface, PFN_vkGetInstanceProcAddr get_instance_proc_addr,
+                             retro_vulkan_create_device_wrapper_t create_device_wrapper, void *opaque)
+{
+	if (!create_device_wrapper)
+		return false;
+
+	// v2 asks nothing of us in terms of extensions or features - the frontend adds what it
+	// needs inside the wrapper - but Context::create_device() takes the required features by
+	// pointer and dereferences it, so hand it an empty set rather than nullptr. The optional
+	// features paraLLEl-RDP itself wants are enabled from the GPU's own set as usual.
+	const VkPhysicalDeviceFeatures no_required_features = {};
+
+	return parallel_create_device_impl(frontend_context, instance, gpu, surface, get_instance_proc_addr,
+	                                   nullptr, 0, &no_required_features, create_device_wrapper, opaque);
 }
 
 static const VkApplicationInfo parallel_app_info = {

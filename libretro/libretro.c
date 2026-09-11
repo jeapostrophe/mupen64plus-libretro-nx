@@ -1864,6 +1864,11 @@ static bool retro_init_vulkan(void)
    hw_context_negotiation.get_application_info = parallel_get_application_info;
    hw_context_negotiation.create_device = parallel_create_device;
    hw_context_negotiation.destroy_device = NULL;
+   /* v2 takes precedence where the frontend understands it; create_device stays
+    * for older frontends. create_instance is left NULL - the frontend's own
+    * VkInstance is fine for us. */
+   hw_context_negotiation.create_instance = NULL;
+   hw_context_negotiation.create_device2 = parallel_create_device2;
    if (!environ_cb(RETRO_ENVIRONMENT_SET_HW_RENDER_CONTEXT_NEGOTIATION_INTERFACE, &hw_context_negotiation))
    {
       if (log_cb)

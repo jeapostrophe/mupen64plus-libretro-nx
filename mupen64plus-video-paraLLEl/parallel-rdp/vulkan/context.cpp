@@ -1185,7 +1185,13 @@ bool Context::create_device(VkPhysicalDevice gpu_, VkSurfaceKHR surface, const c
 	for (auto *enabled_extension : enabled_extensions)
 		LOGI("Enabling device extension: %s.\n", enabled_extension);
 
-	if (vkCreateDevice(gpu, &device_info, nullptr, &device) != VK_SUCCESS)
+	if (device_create_wrapper)
+	{
+		device = device_create_wrapper(gpu, device_create_wrapper_opaque, &device_info);
+		if (device == VK_NULL_HANDLE)
+			return false;
+	}
+	else if (vkCreateDevice(gpu, &device_info, nullptr, &device) != VK_SUCCESS)
 		return false;
 
 #ifdef GRANITE_VULKAN_FOSSILIZE
