@@ -673,14 +673,10 @@ void gen_interrupt(struct r4300_core* r4300)
     if (!r4300->cp0.interrupt_unsafe_state)
     {
 #ifdef __LIBRETRO__
-        /* A load as well as a save: between retro_run calls the core thread is
+        /* Loads as well as saves: between retro_run calls the core thread is
          * parked in this handler, and waiting for the next interrupt would first
          * emulate on to it. */
-        if (savestates_get_job() != savestates_job_nothing)
-        {
-            retro_savestate_service();
-            return;
-        }
+        retro_savestate_service();
 #else
         if (savestates_get_job() == savestates_job_save)
         {

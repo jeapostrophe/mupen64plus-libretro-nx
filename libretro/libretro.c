@@ -2136,7 +2136,6 @@ size_t retro_serialize_size (void)
 static bool savestate_run_job(savestates_job j, const void *data)
 {
    retro_savestate_complete = false;
-   retro_savestate_result = 0;
 
    savestates_set_job(j, savestates_type_m64p, data);
 
@@ -2275,13 +2274,13 @@ void retro_return(void)
     }
 }
 
-/* gen_interrupt calls this at a safe point with a savestate job pending. It
- * services the job, hands the result to the waiting retro_serialize or
- * retro_unserialize and switches back to it, and services any further job
- * queued before the next retro_run at this same point. The next retro_run
- * finds no job pending, so emulation resumes where it stopped and runs one
- * frame. With the threaded GLideN64 renderer retro_return() does nothing and
- * this returns once no job is pending. */
+/* gen_interrupt calls this at a safe point; it returns at once when no
+ * savestate job is pending. Otherwise it services the job, hands the result to
+ * the waiting retro_serialize or retro_unserialize and switches back to it,
+ * and services any further job queued before the next retro_run at this same
+ * point. The next retro_run finds no job pending, so emulation resumes where
+ * it stopped and runs one frame. With the threaded GLideN64 renderer
+ * retro_return() does nothing and this returns once no job is pending. */
 void retro_savestate_service(void)
 {
     for (;;)

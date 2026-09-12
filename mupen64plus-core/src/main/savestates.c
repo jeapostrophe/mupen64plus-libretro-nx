@@ -185,12 +185,11 @@ void savestates_set_job(savestates_job j, savestates_type t, const char *fn)
     if (fn != NULL)
         fname = strdup(fn);
 #else
-    /* The job last, with release order: with the threaded GLideN64 renderer
-     * the emulator thread may act on it as soon as it changes. */
-    pthread_mutex_lock(&savestates_lock);
+    /* fname and type before the job, which is stored with release order: with
+     * the threaded GLideN64 renderer the emulator thread may act on it as soon
+     * as it changes. */
     fname = (char*)fn;
     type = t;
-    pthread_mutex_unlock(&savestates_lock);
     __atomic_store_n(&job, j, __ATOMIC_RELEASE);
 #endif // __LIBRETRO__
 }
