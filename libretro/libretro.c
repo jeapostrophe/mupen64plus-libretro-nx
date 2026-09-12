@@ -2181,6 +2181,12 @@ bool retro_unserialize(const void *data, size_t size)
    if (initializing)
       return false;
 
+   /* The load reads exactly retro_serialize_size() bytes and is not told the
+    * buffer's size: a shorter buffer would be read past its end, and a buffer
+    * of any other size is not a state this core wrote. */
+   if (size != retro_serialize_size())
+      return false;
+
    retro_savestate_complete = false;
    retro_savestate_result = 0;
 
@@ -2208,7 +2214,10 @@ bool retro_unserialize(const void *data, size_t size)
       glsm_ctl(GLSM_CTL_STATE_UNBIND, NULL);
    }
 
-   return true;
+   /* savestates_load's outcome, delivered through n64StateCallback before the
+    * core thread switched back (retro_savestate_job_done). A failed load leaves
+    * the machine as it was. */
+   return !!retro_savestate_result;
 }
 
 //Needed to be able to detach controllers for Lylat Wars multiplayer
