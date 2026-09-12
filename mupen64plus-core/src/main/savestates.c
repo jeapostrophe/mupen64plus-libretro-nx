@@ -165,7 +165,12 @@ void savestates_inc_slot(void)
 
 savestates_job savestates_get_job(void)
 {
+#if defined(__LIBRETRO__) && (defined(__GNUC__) || defined(__clang__))
+    /* Pairs with the release in savestates_set_job. */
+    return __atomic_load_n(&job, __ATOMIC_ACQUIRE);
+#else
     return job;
+#endif
 }
 
 void savestates_set_job(savestates_job j, savestates_type t, const char *fn)
@@ -177,15 +182,24 @@ void savestates_set_job(savestates_job j, savestates_type t, const char *fn)
         fname = NULL;
     }
 #endif // __LIBRETRO__
+#ifndef __LIBRETRO__
     job = j;
     type = t;
-#ifndef __LIBRETRO__
     if (fn != NULL)
         fname = strdup(fn);
 #else
+    /* The job last, with release order: with the threaded GLideN64 renderer
+     * the emulator thread may act on it as soon as it changes, and must then
+     * see this fname and type. */
     pthread_mutex_lock(&savestates_lock);
     fname = (char*)fn;
+    type = t;
     pthread_mutex_unlock(&savestates_lock);
+#if defined(__GNUC__) || defined(__clang__)
+    __atomic_store_n(&job, j, __ATOMIC_RELEASE);
+#else
+    job = j;
+#endif
 #endif // __LIBRETRO__
 }
 
@@ -1700,7 +1714,9 @@ int savestates_save_m64p(const struct device* dev, void *data)
     save->data = curr = malloc(save->size);
     if (save->data == NULL)
     {
+#ifndef __LIBRETRO__
         free(save->filepath);
+#endif
         free(save);
         main_message(M64MSG_STATUS, OSD_BOTTOM_LEFT, "Insufficient memory to save state.");
 #ifndef __LIBRETRO__

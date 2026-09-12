@@ -2353,7 +2353,10 @@ void retro_return(void)
  * safe interrupt, which is often past the next VI.
  *
  * A job is still taken only at a safe point: when the handler returns in an
- * unsafe state the job waits for a later interrupt, as before. */
+ * unsafe state the job waits for a later interrupt, as before.
+ *
+ * With the threaded GLideN64 renderer the emulator runs on a thread of its
+ * own, retro_return() does nothing, and this returns once no job is pending. */
 void retro_savestate_job_done(void)
 {
     while (retro_savestate_waiting)
