@@ -2146,6 +2146,10 @@ bool retro_serialize(void *data, size_t size)
    if (initializing)
       return false;
 
+   /* savestates_save_m64p writes exactly retro_serialize_size() bytes. */
+   if (size != retro_serialize_size())
+      return false;
+
    retro_savestate_complete = false;
    retro_savestate_result = 0;
 

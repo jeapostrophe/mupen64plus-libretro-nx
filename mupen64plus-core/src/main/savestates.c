@@ -78,7 +78,10 @@ static int autoinc_save_slot = 0;
 #ifdef USE_SDL
 static SDL_mutex *savestates_lock;
 #else
-static pthread_mutex_t savestates_lock;
+/* Statically initialized: savestates_init() is never called, and a zero-filled
+ * pthread_mutex_t is not a mutex on Darwin (every call fails with EINVAL) while
+ * it is a working one on mingw-w64's winpthreads. */
+static pthread_mutex_t savestates_lock = PTHREAD_MUTEX_INITIALIZER;
 #endif
 
 struct savestate_work {
@@ -270,6 +273,11 @@ int savestates_load_m64p(struct device* dev, const void *data)
     if(strncmp((char *)curr, savestate_magic, 8)!=0)
     {
         main_message(M64MSG_STATUS, OSD_BOTTOM_LEFT, "Savestate is not a valid Mupen64plus savestate.");
+#ifdef USE_SDL
+        SDL_UnlockMutex(savestates_lock);
+#else
+        pthread_mutex_unlock(&savestates_lock);
+#endif
         return 0;
     }
 #endif
