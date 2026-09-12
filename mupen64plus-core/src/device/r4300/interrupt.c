@@ -45,6 +45,9 @@
 #include "device/rcp/vi/vi_controller.h"
 #include "main/main.h"
 #include "main/savestates.h"
+#ifdef __LIBRETRO__
+#include <libretro_private.h>
+#endif
 
 
 /***************************************************************************
@@ -553,6 +556,9 @@ void gen_interrupt(struct r4300_core* r4300)
         if (savestates_get_job() == savestates_job_load)
         {
             savestates_load();
+#ifdef __LIBRETRO__
+            retro_savestate_job_done();
+#endif
             return;
         }
 
@@ -668,8 +674,23 @@ void gen_interrupt(struct r4300_core* r4300)
         if (savestates_get_job() == savestates_job_save)
         {
             savestates_save();
+#ifdef __LIBRETRO__
+            retro_savestate_job_done();
+#endif
             return;
         }
+#ifdef __LIBRETRO__
+        /* A load from retro_unserialize is taken here as well as on entry:
+         * the core thread is parked in this handler between retro_run calls,
+         * and waiting for the next interrupt would first emulate the old
+         * timeline up to it. */
+        if (savestates_get_job() == savestates_job_load)
+        {
+            savestates_load();
+            retro_savestate_job_done();
+            return;
+        }
+#endif
     }
 }
 

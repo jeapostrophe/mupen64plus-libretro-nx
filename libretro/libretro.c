@@ -152,6 +152,9 @@ static char rdp_plugin_last[32] = {0};
 
 // Savestate globals
 bool retro_savestate_complete = false;
+/* True while retro_serialize/retro_unserialize wait for the core thread to
+ * service their job; see retro_savestate_job_done. */
+static bool retro_savestate_waiting = false;
 int  retro_savestate_result = 0;
 
 // 64DD globals
@@ -2158,10 +2161,12 @@ bool retro_serialize(void *data, size_t size)
       glsm_ctl(GLSM_CTL_STATE_BIND, NULL);
    }
 
+   retro_savestate_waiting = true;
    while (!retro_savestate_complete)
    {
       co_switch(game_thread);
    }
+   retro_savestate_waiting = false;
 
    if (current_rdp_type == RDP_PLUGIN_GLIDEN64)
    {
@@ -2191,10 +2196,12 @@ bool retro_unserialize(const void *data, size_t size)
       glsm_ctl(GLSM_CTL_STATE_BIND, NULL);
    }
 
+   retro_savestate_waiting = true;
    while (!retro_savestate_complete)
    {
       co_switch(game_thread);
    }
+   retro_savestate_waiting = false;
 
    if (current_rdp_type == RDP_PLUGIN_GLIDEN64)
    {
@@ -2285,6 +2292,37 @@ void retro_return(void)
     if(!(current_rdp_type == RDP_PLUGIN_GLIDEN64 && EnableThreadedRenderer))
     {
        co_switch(retro_thread);
+    }
+}
+
+/* gen_interrupt calls this right after it has serviced a savestate job.
+ *
+ * Between two retro_run calls the core thread is parked in new_vi(), inside
+ * the VI interrupt handler. retro_serialize/retro_unserialize set a job and
+ * switch in; gen_interrupt services it as soon as that handler returns to a
+ * safe point. Control used to come back only at the NEXT new_vi(), so every
+ * save and every load emulated one more whole frame, and a frontend saving
+ * before every frame ran at twice the speed. Switching back here instead
+ * leaves the next retro_run to emulate exactly the frame it would have.
+ *
+ * The thread stays parked at this safe point until something switches back
+ * in. A further save or load before the next retro_run (a save then a load,
+ * two saves) is serviced right here too; otherwise it would wait for the next
+ * safe interrupt, which is often past the next VI.
+ *
+ * A job is still taken only at a safe point: when the handler returns in an
+ * unsafe state the job waits for a later interrupt, as before. */
+void retro_savestate_job_done(void)
+{
+    while (retro_savestate_waiting)
+    {
+       retro_return();
+       if (savestates_get_job() == savestates_job_save)
+          savestates_save();
+       else if (savestates_get_job() == savestates_job_load)
+          savestates_load();
+       else
+          break;
     }
 }
 
