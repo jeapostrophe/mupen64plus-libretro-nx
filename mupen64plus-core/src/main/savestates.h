@@ -59,7 +59,7 @@ int savestates_load_m64p(struct device* dev, char *filepath);
 #else
 int savestates_save_m64p(const struct device* dev, void *data);
 int savestates_load_m64p(struct device* dev, const void *data);
-int savestates_m64p_header_ok(const void *data);
+unsigned int savestates_m64p_header_version(const unsigned char *header);
 #endif
 
 #endif /* __SAVESTAVES_H__ */

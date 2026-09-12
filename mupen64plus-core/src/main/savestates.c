@@ -79,8 +79,7 @@ static int autoinc_save_slot = 0;
 static SDL_mutex *savestates_lock;
 #else
 /* Statically initialized: savestates_init() is never called, and a zero-filled
- * pthread_mutex_t is not a mutex on Darwin (every call fails with EINVAL) while
- * it is a working one on mingw-w64's winpthreads. */
+ * pthread_mutex_t is not a valid mutex everywhere (on Darwin every call fails). */
 static pthread_mutex_t savestates_lock = PTHREAD_MUTEX_INITIALIZER;
 #endif
 
@@ -165,7 +164,7 @@ void savestates_inc_slot(void)
 
 savestates_job savestates_get_job(void)
 {
-#if defined(__LIBRETRO__) && (defined(__GNUC__) || defined(__clang__))
+#ifdef __LIBRETRO__
     /* Pairs with the release in savestates_set_job. */
     return __atomic_load_n(&job, __ATOMIC_ACQUIRE);
 #else
@@ -181,25 +180,18 @@ void savestates_set_job(savestates_job j, savestates_type t, const char *fn)
         free(fname);
         fname = NULL;
     }
-#endif // __LIBRETRO__
-#ifndef __LIBRETRO__
     job = j;
     type = t;
     if (fn != NULL)
         fname = strdup(fn);
 #else
     /* The job last, with release order: with the threaded GLideN64 renderer
-     * the emulator thread may act on it as soon as it changes, and must then
-     * see this fname and type. */
+     * the emulator thread may act on it as soon as it changes. */
     pthread_mutex_lock(&savestates_lock);
     fname = (char*)fn;
     type = t;
     pthread_mutex_unlock(&savestates_lock);
-#if defined(__GNUC__) || defined(__clang__)
     __atomic_store_n(&job, j, __ATOMIC_RELEASE);
-#else
-    job = j;
-#endif
 #endif // __LIBRETRO__
 }
 
@@ -226,7 +218,7 @@ static void savestates_clear_job(void)
 /* The checks savestates_load_m64p makes on a state's 44-byte header before it
  * touches the machine: the magic, a compatible version and this ROM's MD5.
  * Returns the version, or 0 with a status message when one fails. */
-static unsigned int savestates_m64p_header_version(const unsigned char *header)
+unsigned int savestates_m64p_header_version(const unsigned char *header)
 {
     unsigned int version;
 
@@ -252,15 +244,6 @@ static unsigned int savestates_m64p_header_version(const unsigned char *header)
 
     return version;
 }
-
-#ifdef __LIBRETRO__
-/* Whether a state buffer starts with a header savestates_load_m64p accepts, so
- * a frontend can refuse it before the load is queued. */
-int savestates_m64p_header_ok(const void *data)
-{
-    return savestates_m64p_header_version((const unsigned char *)data) != 0;
-}
-#endif
 
 #ifndef __LIBRETRO__
 int savestates_load_m64p(struct device* dev, char *filepath)
@@ -1606,12 +1589,10 @@ int savestates_load(void)
     }
 #endif // __LIBRETRO__
 
-    /* Clear the job before reporting it done: with the threaded GLideN64
-     * renderer the frontend can queue its next job as soon as it sees this. */
-    savestates_clear_job();
-
     // deliver callback to indicate completion of state loading operation
     StateChanged(M64CORE_STATE_LOADCOMPLETE, ret);
+
+    savestates_clear_job();
 
     return ret;
 }
@@ -1664,10 +1645,7 @@ static void savestates_save_m64p_work(struct work_struct *work)
 #ifdef USE_SDL
     SDL_UnlockMutex(savestates_lock);
 #else
-    /* A libretro save is reported once, by savestates_save. */
-#ifndef __LIBRETRO__
     StateChanged(M64CORE_STATE_SAVECOMPLETE, 1);
-#endif
     pthread_mutex_unlock(&savestates_lock);
 #endif
 }
@@ -1692,9 +1670,7 @@ int savestates_save_m64p(const struct device* dev, void *data)
     save = malloc(sizeof(*save));
     if (!save) {
         main_message(M64MSG_STATUS, OSD_BOTTOM_LEFT, "Insufficient memory to save state.");
-#ifndef __LIBRETRO__
         StateChanged(M64CORE_STATE_SAVECOMPLETE, 0);
-#endif
         return 0;
     }
 
@@ -1719,9 +1695,7 @@ int savestates_save_m64p(const struct device* dev, void *data)
 #endif
         free(save);
         main_message(M64MSG_STATUS, OSD_BOTTOM_LEFT, "Insufficient memory to save state.");
-#ifndef __LIBRETRO__
         StateChanged(M64CORE_STATE_SAVECOMPLETE, 0);
-#endif
         return 0;
     }
 
@@ -2374,14 +2348,11 @@ int savestates_save(void)
         ret = 0;
     }
 
+    // deliver callback to indicate completion of state saving operation
+    StateChanged(M64CORE_STATE_SAVECOMPLETE, ret);
 #endif // __LIBRETRO__
 
     savestates_clear_job();
-
-#ifdef __LIBRETRO__
-    /* Reported after the job is cleared, as savestates_load does. */
-    StateChanged(M64CORE_STATE_SAVECOMPLETE, ret);
-#endif
 
     return ret;
 }

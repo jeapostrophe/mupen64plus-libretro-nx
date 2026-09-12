@@ -555,9 +555,10 @@ void gen_interrupt(struct r4300_core* r4300)
     {
         if (savestates_get_job() == savestates_job_load)
         {
-            savestates_load();
 #ifdef __LIBRETRO__
-            retro_savestate_job_done();
+            retro_savestate_service();
+#else
+            savestates_load();
 #endif
             return;
         }
@@ -671,23 +672,19 @@ void gen_interrupt(struct r4300_core* r4300)
 
     if (!r4300->cp0.interrupt_unsafe_state)
     {
+#ifdef __LIBRETRO__
+        /* A load as well as a save: between retro_run calls the core thread is
+         * parked in this handler, and waiting for the next interrupt would first
+         * emulate on to it. */
+        if (savestates_get_job() != savestates_job_nothing)
+        {
+            retro_savestate_service();
+            return;
+        }
+#else
         if (savestates_get_job() == savestates_job_save)
         {
             savestates_save();
-#ifdef __LIBRETRO__
-            retro_savestate_job_done();
-#endif
-            return;
-        }
-#ifdef __LIBRETRO__
-        /* A load from retro_unserialize is taken here as well as on entry:
-         * the core thread is parked in this handler between retro_run calls,
-         * and waiting for the next interrupt would first emulate the old
-         * timeline up to it. */
-        if (savestates_get_job() == savestates_job_load)
-        {
-            savestates_load();
-            retro_savestate_job_done();
             return;
         }
 #endif

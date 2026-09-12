@@ -151,10 +151,9 @@ float retro_screen_aspect = 4.0 / 3.0;
 static char rdp_plugin_last[32] = {0};
 
 // Savestate globals
+/* Published by retro_savestate_service with release order and polled with
+ * acquire order: with the threaded GLideN64 renderer those are two threads. */
 bool retro_savestate_complete = false;
-/* True while retro_serialize/retro_unserialize wait for the core thread to
- * service their job; see retro_savestate_job_done. */
-static bool retro_savestate_waiting = false;
 int  retro_savestate_result = 0;
 
 // 64DD globals
@@ -393,37 +392,6 @@ static void cleanup_global_paths()
     {
         free(retro_transferpak_ram_path);
         retro_transferpak_ram_path = NULL;
-    }
-}
-
-/* With the threaded GLideN64 renderer n64StateCallback runs on the emulator
- * thread while retro_serialize/retro_unserialize poll the flag on another, so
- * the flag is published with release order and read with acquire order:
- * whoever sees it set also sees retro_savestate_result. */
-static void savestate_complete_publish(void)
-{
-#if defined(__GNUC__) || defined(__clang__)
-    __atomic_store_n(&retro_savestate_complete, true, __ATOMIC_RELEASE);
-#else
-    retro_savestate_complete = true;
-#endif
-}
-
-static bool savestate_complete_seen(void)
-{
-#if defined(__GNUC__) || defined(__clang__)
-    return __atomic_load_n(&retro_savestate_complete, __ATOMIC_ACQUIRE);
-#else
-    return retro_savestate_complete;
-#endif
-}
-
-static void n64StateCallback(void *Context, m64p_core_param param_type, int new_value)
-{
-    if(param_type == M64CORE_STATE_LOADCOMPLETE || param_type == M64CORE_STATE_SAVECOMPLETE)
-    {
-        retro_savestate_result = new_value;
-        savestate_complete_publish();
     }
 }
 
@@ -751,7 +719,7 @@ void retro_init(void)
         game_thread = co_create(65536 * sizeof(void*) * 16, (void (*)(void))EmuThreadFunction);
     }
 
-    m64p_error ret = CoreStartup(FRONTEND_API_VERSION, ".", ".", NULL, n64DebugCallback, 0, n64StateCallback);
+    m64p_error ret = CoreStartup(FRONTEND_API_VERSION, ".", ".", NULL, n64DebugCallback, 0, NULL);
     if(ret && log_cb)
         log_cb(RETRO_LOG_ERROR, CORE_NAME ": failed to initialize core (err=%i)\n", ret);
 }
@@ -2163,20 +2131,14 @@ size_t retro_serialize_size (void)
     return 16788288 + 1024 + 4 + 4096;
 }
 
-bool retro_serialize(void *data, size_t size)
+/* Queues a savestate job, runs the core thread until retro_savestate_service
+ * has serviced it, and returns its result. */
+static bool savestate_run_job(savestates_job j, const void *data)
 {
-   if (initializing)
-      return false;
-
-   /* savestates_save_m64p writes retro_serialize_size() bytes; libretro.h asks
-    * for false only when the buffer is smaller than that. */
-   if (size < retro_serialize_size())
-      return false;
-
    retro_savestate_complete = false;
    retro_savestate_result = 0;
 
-   savestates_set_job(savestates_job_save, savestates_type_m64p, data);
+   savestates_set_job(j, savestates_type_m64p, data);
 
    if (current_rdp_type == RDP_PLUGIN_GLIDEN64)
    {
@@ -2188,12 +2150,10 @@ bool retro_serialize(void *data, size_t size)
       glsm_ctl(GLSM_CTL_STATE_BIND, NULL);
    }
 
-   retro_savestate_waiting = true;
-   while (!savestate_complete_seen())
+   while (!__atomic_load_n(&retro_savestate_complete, __ATOMIC_ACQUIRE))
    {
       co_switch(game_thread);
    }
-   retro_savestate_waiting = false;
 
    if (current_rdp_type == RDP_PLUGIN_GLIDEN64)
    {
@@ -2203,54 +2163,32 @@ bool retro_serialize(void *data, size_t size)
    return !!retro_savestate_result;
 }
 
+bool retro_serialize(void *data, size_t size)
+{
+   if (initializing)
+      return false;
+
+   /* The save writes retro_serialize_size() bytes; libretro.h asks for false
+    * only when the buffer is smaller. */
+   if (size < retro_serialize_size())
+      return false;
+
+   return savestate_run_job(savestates_job_save, data);
+}
+
 bool retro_unserialize(const void *data, size_t size)
 {
    if (initializing)
       return false;
 
-   /* The load reads exactly retro_serialize_size() bytes and is not told the
-    * buffer's size: a shorter buffer would be read past its end, and a buffer
-    * of any other size is not a state this core wrote. */
-   if (size != retro_serialize_size())
+   /* Refuse, leaving the machine untouched, anything but a whole state this
+    * core writes: the load reads up to retro_serialize_size() bytes without
+    * being told the buffer's size, and a queued load may emulate on to a safe
+    * interrupt before it would reject the header. */
+   if (size != retro_serialize_size() || !savestates_m64p_header_version(data))
       return false;
 
-   /* Refuse a bad header now rather than queue the load: a queued load waits
-    * for a safe interrupt, and when the parked VI handler is in an unsafe state
-    * the core emulates on to one first. A state refused here, by size or by
-    * header, leaves the machine untouched. */
-   if (!savestates_m64p_header_ok(data))
-      return false;
-
-   retro_savestate_complete = false;
-   retro_savestate_result = 0;
-
-   savestates_set_job(savestates_job_load, savestates_type_m64p, data);
-
-   if (current_rdp_type == RDP_PLUGIN_GLIDEN64)
-   {
-      if(EnableThreadedRenderer)
-      {
-         // Ensure the Audio driver is on (f.e. menu sounds off)
-         environ_clear_thread_waits_cb(1, NULL);
-      }
-      glsm_ctl(GLSM_CTL_STATE_BIND, NULL);
-   }
-
-   retro_savestate_waiting = true;
-   while (!savestate_complete_seen())
-   {
-      co_switch(game_thread);
-   }
-   retro_savestate_waiting = false;
-
-   if (current_rdp_type == RDP_PLUGIN_GLIDEN64)
-   {
-      glsm_ctl(GLSM_CTL_STATE_UNBIND, NULL);
-   }
-
-   /* savestates_load's outcome, delivered through n64StateCallback before the
-    * core thread switched back (retro_savestate_job_done). */
-   return !!retro_savestate_result;
+   return savestate_run_job(savestates_job_load, data);
 }
 
 //Needed to be able to detach controllers for Lylat Wars multiplayer
@@ -2337,37 +2275,28 @@ void retro_return(void)
     }
 }
 
-/* gen_interrupt calls this right after it has serviced a savestate job.
- *
- * Between two retro_run calls the core thread is parked in new_vi(), inside
- * the VI interrupt handler. retro_serialize/retro_unserialize set a job and
- * switch in; gen_interrupt services it as soon as that handler returns to a
- * safe point. Control used to come back only at the NEXT new_vi(), so every
- * save and every load emulated one more whole frame, and a frontend saving
- * before every frame ran at twice the speed. Switching back here instead
- * leaves the next retro_run to emulate exactly the frame it would have.
- *
- * The thread stays parked at this safe point until something switches back
- * in. A further save or load before the next retro_run (a save then a load,
- * two saves) is serviced right here too; otherwise it would wait for the next
- * safe interrupt, which is often past the next VI.
- *
- * A job is still taken only at a safe point: when the handler returns in an
- * unsafe state the job waits for a later interrupt, as before.
- *
- * With the threaded GLideN64 renderer the emulator runs on a thread of its
- * own, retro_return() does nothing, and this returns once no job is pending. */
-void retro_savestate_job_done(void)
+/* gen_interrupt calls this at a safe point with a savestate job pending. It
+ * services the job, hands the result to the waiting retro_serialize or
+ * retro_unserialize and switches back to it, and services any further job
+ * queued before the next retro_run at this same point. The next retro_run
+ * finds no job pending, so emulation resumes where it stopped and runs one
+ * frame. With the threaded GLideN64 renderer retro_return() does nothing and
+ * this returns once no job is pending. */
+void retro_savestate_service(void)
 {
-    while (retro_savestate_waiting)
+    for (;;)
     {
-       retro_return();
-       if (savestates_get_job() == savestates_job_save)
-          savestates_save();
-       else if (savestates_get_job() == savestates_job_load)
-          savestates_load();
+       savestates_job job = savestates_get_job();
+
+       if (job == savestates_job_save)
+          retro_savestate_result = savestates_save();
+       else if (job == savestates_job_load)
+          retro_savestate_result = savestates_load();
        else
-          break;
+          return;
+
+       __atomic_store_n(&retro_savestate_complete, true, __ATOMIC_RELEASE);
+       retro_return();
     }
 }
 

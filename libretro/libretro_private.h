@@ -18,7 +18,7 @@ extern retro_log_printf_t log_cb;
 extern retro_perf_register_t perf_register_cb;
 extern bool libretro_swap_buffer;
 void retro_return();
-void retro_savestate_job_done(void);
+void retro_savestate_service(void);
 
 #define SDL_GetTicks() FAKE_SDL_TICKS
 
