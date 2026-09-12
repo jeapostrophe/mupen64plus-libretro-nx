@@ -396,12 +396,34 @@ static void cleanup_global_paths()
     }
 }
 
+/* With the threaded GLideN64 renderer n64StateCallback runs on the emulator
+ * thread while retro_serialize/retro_unserialize poll the flag on another, so
+ * the flag is published with release order and read with acquire order:
+ * whoever sees it set also sees retro_savestate_result. */
+static void savestate_complete_publish(void)
+{
+#if defined(__GNUC__) || defined(__clang__)
+    __atomic_store_n(&retro_savestate_complete, true, __ATOMIC_RELEASE);
+#else
+    retro_savestate_complete = true;
+#endif
+}
+
+static bool savestate_complete_seen(void)
+{
+#if defined(__GNUC__) || defined(__clang__)
+    return __atomic_load_n(&retro_savestate_complete, __ATOMIC_ACQUIRE);
+#else
+    return retro_savestate_complete;
+#endif
+}
+
 static void n64StateCallback(void *Context, m64p_core_param param_type, int new_value)
 {
     if(param_type == M64CORE_STATE_LOADCOMPLETE || param_type == M64CORE_STATE_SAVECOMPLETE)
     {
-        retro_savestate_complete = true;
         retro_savestate_result = new_value;
+        savestate_complete_publish();
     }
 }
 
@@ -2146,8 +2168,9 @@ bool retro_serialize(void *data, size_t size)
    if (initializing)
       return false;
 
-   /* savestates_save_m64p writes exactly retro_serialize_size() bytes. */
-   if (size != retro_serialize_size())
+   /* savestates_save_m64p writes retro_serialize_size() bytes; libretro.h asks
+    * for false only when the buffer is smaller than that. */
+   if (size < retro_serialize_size())
       return false;
 
    retro_savestate_complete = false;
@@ -2166,7 +2189,7 @@ bool retro_serialize(void *data, size_t size)
    }
 
    retro_savestate_waiting = true;
-   while (!retro_savestate_complete)
+   while (!savestate_complete_seen())
    {
       co_switch(game_thread);
    }
@@ -2191,6 +2214,13 @@ bool retro_unserialize(const void *data, size_t size)
    if (size != retro_serialize_size())
       return false;
 
+   /* Refuse a bad header now rather than queue the load: a queued load waits
+    * for a safe interrupt, and when the parked VI handler is in an unsafe state
+    * the core emulates on to one first. A state refused here, by size or by
+    * header, leaves the machine untouched. */
+   if (!savestates_m64p_header_ok(data))
+      return false;
+
    retro_savestate_complete = false;
    retro_savestate_result = 0;
 
@@ -2207,7 +2237,7 @@ bool retro_unserialize(const void *data, size_t size)
    }
 
    retro_savestate_waiting = true;
-   while (!retro_savestate_complete)
+   while (!savestate_complete_seen())
    {
       co_switch(game_thread);
    }
@@ -2219,8 +2249,7 @@ bool retro_unserialize(const void *data, size_t size)
    }
 
    /* savestates_load's outcome, delivered through n64StateCallback before the
-    * core thread switched back (retro_savestate_job_done). A failed load leaves
-    * the machine as it was. */
+    * core thread switched back (retro_savestate_job_done). */
    return !!retro_savestate_result;
 }
 

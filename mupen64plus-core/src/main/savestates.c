@@ -209,6 +209,45 @@ static void savestates_clear_job(void)
 #define PUTDATA(buff, type, value) \
     do { type x = value; PUTARRAY(&x, buff, type, 1); } while(0)
 
+/* The checks savestates_load_m64p makes on a state's 44-byte header before it
+ * touches the machine: the magic, a compatible version and this ROM's MD5.
+ * Returns the version, or 0 with a status message when one fails. */
+static unsigned int savestates_m64p_header_version(const unsigned char *header)
+{
+    unsigned int version;
+
+    if (strncmp((const char *)header, savestate_magic, 8) != 0)
+    {
+        main_message(M64MSG_STATUS, OSD_BOTTOM_LEFT, "Savestate is not a valid Mupen64plus savestate.");
+        return 0;
+    }
+
+    version = ((unsigned int)header[8] << 24) | ((unsigned int)header[9] << 16)
+            | ((unsigned int)header[10] << 8) | header[11];
+    if ((version >> 16) != (savestate_latest_version >> 16))
+    {
+        main_message(M64MSG_STATUS, OSD_BOTTOM_LEFT, "State version (%08x) isn't compatible. Please update Mupen64Plus.", version);
+        return 0;
+    }
+
+    if (memcmp(header + 12, ROM_SETTINGS.MD5, 32))
+    {
+        main_message(M64MSG_STATUS, OSD_BOTTOM_LEFT, "State ROM MD5 does not match current ROM.");
+        return 0;
+    }
+
+    return version;
+}
+
+#ifdef __LIBRETRO__
+/* Whether a state buffer starts with a header savestates_load_m64p accepts, so
+ * a frontend can refuse it before the load is queued. */
+int savestates_m64p_header_ok(const void *data)
+{
+    return savestates_m64p_header_version((const unsigned char *)data) != 0;
+}
+#endif
+
 #ifndef __LIBRETRO__
 int savestates_load_m64p(struct device* dev, char *filepath)
 #else
@@ -269,28 +308,11 @@ int savestates_load_m64p(struct device* dev, const void *data)
     }
 #else
     memcpy(header, data, 44);
-    curr = header;
-    if(strncmp((char *)curr, savestate_magic, 8)!=0)
-    {
-        main_message(M64MSG_STATUS, OSD_BOTTOM_LEFT, "Savestate is not a valid Mupen64plus savestate.");
-#ifdef USE_SDL
-        SDL_UnlockMutex(savestates_lock);
-#else
-        pthread_mutex_unlock(&savestates_lock);
-#endif
-        return 0;
-    }
 #endif
 
-    curr += 8;
-
-    version = *curr++;
-    version = (version << 8) | *curr++;
-    version = (version << 8) | *curr++;
-    version = (version << 8) | *curr++;
-    if((version >> 16) != (savestate_latest_version >> 16))
+    version = savestates_m64p_header_version(header);
+    if (version == 0)
     {
-        main_message(M64MSG_STATUS, OSD_BOTTOM_LEFT, "State version (%08x) isn't compatible. Please update Mupen64Plus.", version);
 #ifndef __LIBRETRO__
         gzclose(f);
 #endif
@@ -301,21 +323,6 @@ int savestates_load_m64p(struct device* dev, const void *data)
 #endif
         return 0;
     }
-
-    if(memcmp((char *)curr, ROM_SETTINGS.MD5, 32))
-    {
-        main_message(M64MSG_STATUS, OSD_BOTTOM_LEFT, "State ROM MD5 does not match current ROM.");
-#ifndef __LIBRETRO__
-        gzclose(f);
-#endif
-#ifdef USE_SDL
-        SDL_UnlockMutex(savestates_lock);
-#else
-        pthread_mutex_unlock(&savestates_lock);
-#endif
-        return 0;
-    }
-    curr += 32;
 
     /* Read the rest of the savestate */
     savestateSize = 16788244;
@@ -1585,10 +1592,12 @@ int savestates_load(void)
     }
 #endif // __LIBRETRO__
 
+    /* Clear the job before reporting it done: with the threaded GLideN64
+     * renderer the frontend can queue its next job as soon as it sees this. */
+    savestates_clear_job();
+
     // deliver callback to indicate completion of state loading operation
     StateChanged(M64CORE_STATE_LOADCOMPLETE, ret);
-
-    savestates_clear_job();
 
     return ret;
 }
@@ -1641,7 +1650,10 @@ static void savestates_save_m64p_work(struct work_struct *work)
 #ifdef USE_SDL
     SDL_UnlockMutex(savestates_lock);
 #else
+    /* A libretro save is reported once, by savestates_save. */
+#ifndef __LIBRETRO__
     StateChanged(M64CORE_STATE_SAVECOMPLETE, 1);
+#endif
     pthread_mutex_unlock(&savestates_lock);
 #endif
 }
@@ -1666,7 +1678,9 @@ int savestates_save_m64p(const struct device* dev, void *data)
     save = malloc(sizeof(*save));
     if (!save) {
         main_message(M64MSG_STATUS, OSD_BOTTOM_LEFT, "Insufficient memory to save state.");
+#ifndef __LIBRETRO__
         StateChanged(M64CORE_STATE_SAVECOMPLETE, 0);
+#endif
         return 0;
     }
 
@@ -1689,7 +1703,9 @@ int savestates_save_m64p(const struct device* dev, void *data)
         free(save->filepath);
         free(save);
         main_message(M64MSG_STATUS, OSD_BOTTOM_LEFT, "Insufficient memory to save state.");
+#ifndef __LIBRETRO__
         StateChanged(M64CORE_STATE_SAVECOMPLETE, 0);
+#endif
         return 0;
     }
 
@@ -2342,11 +2358,14 @@ int savestates_save(void)
         ret = 0;
     }
 
-    // deliver callback to indicate completion of state saving operation
-    StateChanged(M64CORE_STATE_SAVECOMPLETE, ret);
 #endif // __LIBRETRO__
 
     savestates_clear_job();
+
+#ifdef __LIBRETRO__
+    /* Reported after the job is cleared, as savestates_load does. */
+    StateChanged(M64CORE_STATE_SAVECOMPLETE, ret);
+#endif
 
     return ret;
 }
