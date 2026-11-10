@@ -261,9 +261,17 @@ static uintptr_t jump_table_symbols[] = {
   (intptr_t)breakpoint
 };
 
+#if defined(__APPLE__)
+#include <libkern/OSCacheControl.h>
+#endif
+
 static void cache_flush(char* start, char* end)
 {
-#ifndef WIN32
+#if defined(__APPLE__)
+    // Reading ctr_el0 from EL0 traps (SIGILL) on Apple Silicon; use the
+    // system-provided cache maintenance routine instead.
+    sys_icache_invalidate(start, end - start);
+#elif !defined(WIN32)
     // Don't rely on GCC's __clear_cache implementation, as it caches
     // icache/dcache cache line sizes, that can vary between cores on
     // big.LITTLE architectures.
@@ -439,7 +447,7 @@ static void alloc_reg(struct regstat *cur,int i,signed char tr)
   // registers that have not been used recently.
   if(i>0) {
     for(hr=0;hr<HOST_REGS;hr++) {
-      if(hr!=EXCLUDE_REG&&cur->regmap[hr]==-1) {
+      if(!IS_EXCLUDED_REG(hr)&&cur->regmap[hr]==-1) {
         if(regs[i-1].regmap[hr]!=rs1[i-1]&&regs[i-1].regmap[hr]!=rs2[i-1]&&regs[i-1].regmap[hr]!=rt1[i-1]&&regs[i-1].regmap[hr]!=rt2[i-1]) {
           cur->regmap[hr]=tr;
           cur->dirty&=~(1<<hr);
@@ -451,7 +459,7 @@ static void alloc_reg(struct regstat *cur,int i,signed char tr)
   }
   // Try to allocate any available register
   for(hr=0;hr<HOST_REGS;hr++) {
-    if(hr!=EXCLUDE_REG&&cur->regmap[hr]==-1) {
+    if(!IS_EXCLUDED_REG(hr)&&cur->regmap[hr]==-1) {
       cur->regmap[hr]=tr;
       cur->dirty&=~(1<<hr);
       cur->isconst&=~(1<<hr);
@@ -603,7 +611,7 @@ static void alloc_reg64(struct regstat *cur,int i,signed char tr)
   // registers that have not been used recently.
   if(i>0) {
     for(hr=0;hr<HOST_REGS;hr++) {
-      if(hr!=EXCLUDE_REG&&cur->regmap[hr]==-1) {
+      if(!IS_EXCLUDED_REG(hr)&&cur->regmap[hr]==-1) {
         if(regs[i-1].regmap[hr]!=rs1[i-1]&&regs[i-1].regmap[hr]!=rs2[i-1]&&regs[i-1].regmap[hr]!=rt1[i-1]&&regs[i-1].regmap[hr]!=rt2[i-1]) {
           cur->regmap[hr]=tr|64;
           cur->dirty&=~(1<<hr);
@@ -615,7 +623,7 @@ static void alloc_reg64(struct regstat *cur,int i,signed char tr)
   }
   // Try to allocate any available register
   for(hr=0;hr<HOST_REGS;hr++) {
-    if(hr!=EXCLUDE_REG&&cur->regmap[hr]==-1) {
+    if(!IS_EXCLUDED_REG(hr)&&cur->regmap[hr]==-1) {
       cur->regmap[hr]=tr|64;
       cur->dirty&=~(1<<hr);
       cur->isconst&=~(1<<hr);
@@ -714,12 +722,12 @@ static void alloc_reg_temp(struct regstat *cur,int i,signed char tr)
   // see if it's already allocated
   for(hr=0;hr<HOST_REGS;hr++)
   {
-    if(hr!=EXCLUDE_REG&&cur->regmap[hr]==tr) return;
+    if(!IS_EXCLUDED_REG(hr)&&cur->regmap[hr]==tr) return;
   }
 
   // Try to allocate any available register
   for(hr=HOST_REGS-1;hr>=0;hr--) {
-    if(hr!=EXCLUDE_REG&&cur->regmap[hr]==-1) {
+    if(!IS_EXCLUDED_REG(hr)&&cur->regmap[hr]==-1) {
       cur->regmap[hr]=tr;
       cur->dirty&=~(1<<hr);
       cur->isconst&=~(1<<hr);
@@ -833,7 +841,7 @@ static void alloc_arm64_reg(struct regstat *cur,int i,signed char tr,int hr)
   // see if it's already allocated (and dealloc it)
   for(n=0;n<HOST_REGS;n++)
   {
-    if(n!=EXCLUDE_REG&&cur->regmap[n]==tr) {
+    if(!IS_EXCLUDED_REG(n)&&cur->regmap[n]==tr) {
       dirty=(cur->dirty>>n)&1;
       cur->regmap[n]=-1;
     }
@@ -4521,8 +4529,8 @@ static void do_miniht_jump(int rs,int rh,int ht) {
   emit_cmp(rh,rs);
   intptr_t jaddr=(intptr_t)out;
   emit_jeq(0);
-  if(rs==18) {
-    // x18 is used for trampoline jumps, move it to another register (x0)
+  if(rs==TRAMPOLINE_REG) {
+    // the trampoline register is used for trampoline jumps, move it to another register (x0)
     emit_mov(rs,0);
     rs=0;
   }
@@ -4605,6 +4613,7 @@ static void arch_init(void) {
 
   // Trampolines for jumps >128MB
   intptr_t *ptr,*ptr2,*ptr3;
+  jit_write_begin();
   ptr=(intptr_t *)jump_table_symbols;
   ptr2=(intptr_t *)((char *)base_addr+(1<<TARGET_SIZE_2)-JUMP_TABLE_SIZE);
   ptr3=(intptr_t *)((char *)base_addr_rx+(1<<TARGET_SIZE_2)-JUMP_TABLE_SIZE);
@@ -4615,8 +4624,8 @@ static void arch_init(void) {
     if(offset>=-134217728LL&&offset<134217728LL) {
       *ptr4=0x14000000|((offset>>2)&0x3ffffff); // direct branch
     }else{
-      *ptr4=0x58000000|((8>>2)<<5)|18; // ldr x18,[pc,#8]
-      *(ptr4+1)=0xd61f0000|(18<<5);
+      *ptr4=0x58000000|((8>>2)<<5)|TRAMPOLINE_REG; // ldr x18 (x16 on Apple),[pc,#8]
+      *(ptr4+1)=0xd61f0000|(TRAMPOLINE_REG<<5); // br x18 (x16 on Apple)
     }
     ptr2++;
     *ptr2=*ptr;
@@ -4624,6 +4633,7 @@ static void arch_init(void) {
     ptr2++;
     ptr3+=2;
   }
+  jit_write_end();
 
   __clear_cache((char *)base_addr+(1<<TARGET_SIZE_2)-JUMP_TABLE_SIZE,(char *)base_addr+(1<<TARGET_SIZE_2));
 }

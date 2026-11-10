@@ -53,6 +53,30 @@
 #endif // HAVE_LIBNX
 #endif
 
+#if defined(__APPLE__) && defined(__aarch64__)
+/* Apple Silicon enforces W^X: the MAP_JIT code cache is executable by
+ * default and only writable while the calling thread has toggled itself
+ * into write mode with pthread_jit_write_protect_np(). Exec mode is the
+ * default; every code path that writes to the cache is bracketed with
+ * jit_write_begin/jit_write_end. The depth counter makes the brackets
+ * reentrant (e.g. dynamic_linker -> new_recompile_block). */
+#include <pthread.h>
+static int jit_write_depth;
+static void jit_write_begin(void)
+{
+  if (jit_write_depth++ == 0)
+    pthread_jit_write_protect_np(0);
+}
+static void jit_write_end(void)
+{
+  if (--jit_write_depth == 0)
+    pthread_jit_write_protect_np(1);
+}
+#else
+#define jit_write_begin() do {} while (0)
+#define jit_write_end()   do {} while (0)
+#endif
+
 #if defined(RECOMPILER_DEBUG) && !defined(RECOMP_DBG)
 void recomp_dbg_init(void);
 void recomp_dbg_cleanup(void);
@@ -70,6 +94,15 @@ void recomp_dbg_block(int addr);
 #include "arm64/assem_arm64.h"
 #else
 #error Unsupported dynarec architecture
+#endif
+
+/* host registers the register allocator must never use */
+#if defined(EXCLUDE_REG2) && defined(EXCLUDE_REG3)
+#define IS_EXCLUDED_REG(r) ((r)==EXCLUDE_REG||(r)==EXCLUDE_REG2||(r)==EXCLUDE_REG3)
+#elif defined(EXCLUDE_REG2)
+#define IS_EXCLUDED_REG(r) ((r)==EXCLUDE_REG||(r)==EXCLUDE_REG2)
+#else
+#define IS_EXCLUDED_REG(r) ((r)==EXCLUDE_REG)
 #endif
 
 /* debug */
@@ -321,7 +354,7 @@ static void clear_all_regs(signed char regmap[])
 static signed char get_reg(signed char regmap[],int r)
 {
   int hr;
-  for (hr=0;hr<HOST_REGS;hr++) if(hr!=EXCLUDE_REG&&regmap[hr]==r) return hr;
+  for (hr=0;hr<HOST_REGS;hr++) if(!IS_EXCLUDED_REG(hr)&&regmap[hr]==r) return hr;
   return -1;
 }
 
@@ -329,7 +362,7 @@ static signed char get_reg(signed char regmap[],int r)
 static signed char get_reg2(signed char regmap1[],signed char regmap2[],int r)
 {
   int hr;
-  for (hr=0;hr<HOST_REGS;hr++) if(hr!=EXCLUDE_REG&&regmap1[hr]==r&&regmap2[hr]==r) return hr;
+  for (hr=0;hr<HOST_REGS;hr++) if(!IS_EXCLUDED_REG(hr)&&regmap1[hr]==r&&regmap2[hr]==r) return hr;
   return -1;
 }
 
@@ -339,7 +372,7 @@ static int count_free_regs(signed char regmap[])
   int hr;
   for(hr=0;hr<HOST_REGS;hr++)
   {
-    if(hr!=EXCLUDE_REG) {
+    if(!IS_EXCLUDED_REG(hr)) {
       if(regmap[hr]<0) count++;
     }
   }
@@ -1247,7 +1280,7 @@ static void clean_registers(int istart,int iend,int wr)
           wont_dirty_i=0;
           // Merge in delay slot (will dirty)
           for(r=0;r<HOST_REGS;r++) {
-            if(r!=EXCLUDE_REG) {
+            if(!IS_EXCLUDED_REG(r)) {
               if((branch_regs[i].regmap[r]&63)==rt1[i]) will_dirty_i|=1<<r;
               if((branch_regs[i].regmap[r]&63)==rt2[i]) will_dirty_i|=1<<r;
               if((branch_regs[i].regmap[r]&63)==rt1[i+1]) will_dirty_i|=1<<r;
@@ -1272,7 +1305,7 @@ static void clean_registers(int istart,int iend,int wr)
           wont_dirty_i=wont_dirty_next;
           // Merge in delay slot (will dirty)
           for(r=0;r<HOST_REGS;r++) {
-            if(r!=EXCLUDE_REG) {
+            if(!IS_EXCLUDED_REG(r)) {
               if(!likely[i]) {
                 // Might not dirty if likely branch is not taken
                 if((branch_regs[i].regmap[r]&63)==rt1[i]) will_dirty_i|=1<<r;
@@ -1295,7 +1328,7 @@ static void clean_registers(int istart,int iend,int wr)
         }
         // Merge in delay slot (wont dirty)
         for(r=0;r<HOST_REGS;r++) {
-          if(r!=EXCLUDE_REG) {
+          if(!IS_EXCLUDED_REG(r)) {
             if((regs[i].regmap[r]&63)==rt1[i]) wont_dirty_i|=1<<r;
             if((regs[i].regmap[r]&63)==rt2[i]) wont_dirty_i|=1<<r;
             if((regs[i].regmap[r]&63)==rt1[i+1]) wont_dirty_i|=1<<r;
@@ -1327,7 +1360,7 @@ static void clean_registers(int istart,int iend,int wr)
             temp_wont_dirty=0;
             // Merge in delay slot (will dirty)
             for(r=0;r<HOST_REGS;r++) {
-              if(r!=EXCLUDE_REG) {
+              if(!IS_EXCLUDED_REG(r)) {
                 if((branch_regs[i].regmap[r]&63)==rt1[i]) temp_will_dirty|=1<<r;
                 if((branch_regs[i].regmap[r]&63)==rt2[i]) temp_will_dirty|=1<<r;
                 if((branch_regs[i].regmap[r]&63)==rt1[i+1]) temp_will_dirty|=1<<r;
@@ -1350,7 +1383,7 @@ static void clean_registers(int istart,int iend,int wr)
             temp_wont_dirty=wont_dirty_next;
             // Merge in delay slot (will dirty)
             for(r=0;r<HOST_REGS;r++) {
-              if(r!=EXCLUDE_REG) {
+              if(!IS_EXCLUDED_REG(r)) {
                 if(!likely[i]) {
                   // Will not dirty if likely branch is not taken
                   if((branch_regs[i].regmap[r]&63)==rt1[i]) temp_will_dirty|=1<<r;
@@ -1373,7 +1406,7 @@ static void clean_registers(int istart,int iend,int wr)
           }
           // Merge in delay slot (wont dirty)
           for(r=0;r<HOST_REGS;r++) {
-            if(r!=EXCLUDE_REG) {
+            if(!IS_EXCLUDED_REG(r)) {
               if((regs[i].regmap[r]&63)==rt1[i]) temp_wont_dirty|=1<<r;
               if((regs[i].regmap[r]&63)==rt2[i]) temp_wont_dirty|=1<<r;
               if((regs[i].regmap[r]&63)==rt1[i+1]) temp_wont_dirty|=1<<r;
@@ -1389,7 +1422,7 @@ static void clean_registers(int istart,int iend,int wr)
           // Deal with changed mappings
           if(i<iend) {
             for(r=0;r<HOST_REGS;r++) {
-              if(r!=EXCLUDE_REG) {
+              if(!IS_EXCLUDED_REG(r)) {
                 if(regs[i].regmap[r]!=regmap_pre[i][r]) {
                   temp_will_dirty&=~(1<<r);
                   temp_wont_dirty&=~(1<<r);
@@ -1424,7 +1457,7 @@ static void clean_registers(int istart,int iend,int wr)
             wont_dirty_i=0;
           //if(ba[i]>start+i*4) { // Disable recursion (for debugging)
             for(r=0;r<HOST_REGS;r++) {
-              if(r!=EXCLUDE_REG) {
+              if(!IS_EXCLUDED_REG(r)) {
                 if(branch_regs[i].regmap[r]==regs[(ba[i]-start)>>2].regmap_entry[r]) {
                   will_dirty_i|=will_dirty[(ba[i]-start)>>2]&(1<<r);
                   wont_dirty_i|=wont_dirty[(ba[i]-start)>>2]&(1<<r);
@@ -1438,7 +1471,7 @@ static void clean_registers(int istart,int iend,int wr)
           //}
             // Merge in delay slot
             for(r=0;r<HOST_REGS;r++) {
-              if(r!=EXCLUDE_REG) {
+              if(!IS_EXCLUDED_REG(r)) {
                 if((branch_regs[i].regmap[r]&63)==rt1[i]) will_dirty_i|=1<<r;
                 if((branch_regs[i].regmap[r]&63)==rt2[i]) will_dirty_i|=1<<r;
                 if((branch_regs[i].regmap[r]&63)==rt1[i+1]) will_dirty_i|=1<<r;
@@ -1461,7 +1494,7 @@ static void clean_registers(int istart,int iend,int wr)
             wont_dirty_i=wont_dirty_next;
           //if(ba[i]>start+i*4) { // Disable recursion (for debugging)
             for(r=0;r<HOST_REGS;r++) {
-              if(r!=EXCLUDE_REG) {
+              if(!IS_EXCLUDED_REG(r)) {
                 signed char target_reg=branch_regs[i].regmap[r];
                 if(target_reg==regs[(ba[i]-start)>>2].regmap_entry[r]) {
                   will_dirty_i&=will_dirty[(ba[i]-start)>>2]&(1<<r);
@@ -1485,7 +1518,7 @@ static void clean_registers(int istart,int iend,int wr)
           //}
             // Merge in delay slot
             for(r=0;r<HOST_REGS;r++) {
-              if(r!=EXCLUDE_REG) {
+              if(!IS_EXCLUDED_REG(r)) {
                 if(!likely[i]) {
                   // Might not dirty if likely branch is not taken
                   if((branch_regs[i].regmap[r]&63)==rt1[i]) will_dirty_i|=1<<r;
@@ -1508,7 +1541,7 @@ static void clean_registers(int istart,int iend,int wr)
           }
           // Merge in delay slot (won't dirty)
           for(r=0;r<HOST_REGS;r++) {
-            if(r!=EXCLUDE_REG) {
+            if(!IS_EXCLUDED_REG(r)) {
               if((regs[i].regmap[r]&63)==rt1[i]) wont_dirty_i|=1<<r;
               if((regs[i].regmap[r]&63)==rt2[i]) wont_dirty_i|=1<<r;
               if((regs[i].regmap[r]&63)==rt1[i+1]) wont_dirty_i|=1<<r;
@@ -1545,7 +1578,7 @@ static void clean_registers(int istart,int iend,int wr)
     will_dirty_next=will_dirty_i;
     wont_dirty_next=wont_dirty_i;
     for(r=0;r<HOST_REGS;r++) {
-      if(r!=EXCLUDE_REG) {
+      if(!IS_EXCLUDED_REG(r)) {
         if((regs[i].regmap[r]&63)==rt1[i]) will_dirty_i|=1<<r;
         if((regs[i].regmap[r]&63)==rt2[i]) will_dirty_i|=1<<r;
         if((regs[i].regmap[r]&63)>33) will_dirty_i&=~(1<<r);
@@ -1585,7 +1618,7 @@ static void clean_registers(int istart,int iend,int wr)
         {
           if(i<iend-1&&itype[i]!=RJUMP&&itype[i]!=UJUMP&&(source[i]>>16)!=0x1000) {
             for(r=0;r<HOST_REGS;r++) {
-              if(r!=EXCLUDE_REG) {
+              if(!IS_EXCLUDED_REG(r)) {
                 if(regs[i].regmap[r]==regmap_pre[i+2][r]) {
                   regs[i+2].wasdirty&=wont_dirty_i|~(1<<r);
                 }else {/*DebugMessage(M64MSG_VERBOSE, "i: %x (%d) mismatch(+2): %d",start+i*4,i,r); / *assert(!((wont_dirty_i>>r)&1));*/}
@@ -1597,7 +1630,7 @@ static void clean_registers(int istart,int iend,int wr)
         {
           if(i<iend) {
             for(r=0;r<HOST_REGS;r++) {
-              if(r!=EXCLUDE_REG) {
+              if(!IS_EXCLUDED_REG(r)) {
                 if(regs[i].regmap[r]==regmap_pre[i+1][r]) {
                   regs[i+1].wasdirty&=wont_dirty_i|~(1<<r);
                 }else {/*DebugMessage(M64MSG_VERBOSE, "i: %x (%d) mismatch(+1): %d",start+i*4,i,r);/ *assert(!((wont_dirty_i>>r)&1));*/}
@@ -1612,7 +1645,7 @@ static void clean_registers(int istart,int iend,int wr)
     temp_will_dirty=will_dirty_i;
     temp_wont_dirty=wont_dirty_i;
     for(r=0;r<HOST_REGS;r++) {
-      if(r!=EXCLUDE_REG) {
+      if(!IS_EXCLUDED_REG(r)) {
         int nr;
         if(regs[i].regmap[r]==regmap_pre[i][r]) {
           if(wr) {
@@ -1707,7 +1740,7 @@ static int match_bt(signed char i_regmap[],uint64_t i_is32,uint64_t i_dirty,int 
     if(regs[t].regmap_entry[HOST_CCREG]!=CCREG) return 0;
     for(hr=0;hr<HOST_REGS;hr++)
     {
-      if(hr!=EXCLUDE_REG)
+      if(!IS_EXCLUDED_REG(hr))
       {
         if(i_regmap[hr]!=regs[t].regmap_entry[hr])
         {
@@ -1764,7 +1797,7 @@ static int match_bt(signed char i_regmap[],uint64_t i_is32,uint64_t i_dirty,int 
     int hr;
     for(hr=0;hr<HOST_REGS;hr++)
     {
-      if(hr!=EXCLUDE_REG)
+      if(!IS_EXCLUDED_REG(hr))
       {
         if(i_regmap[hr]>=0)
         {
@@ -1788,7 +1821,7 @@ static void alloc_all(struct regstat *cur,int i)
   int hr;
 
   for(hr=0;hr<HOST_REGS;hr++) {
-    if(hr!=EXCLUDE_REG) {
+    if(!IS_EXCLUDED_REG(hr)) {
       if(((cur->regmap[hr]&63)!=rs1[i])&&((cur->regmap[hr]&63)!=rs2[i])&&
          ((cur->regmap[hr]&63)!=rt1[i])&&((cur->regmap[hr]&63)!=rt2[i]))
       {
@@ -2538,7 +2571,7 @@ static struct ll_entry *get_dirty(struct r4300_core* r4300,u_int vaddr,u_int fla
   return NULL;
 }
 
-void *dynamic_linker(void * src, u_int vaddr)
+static void *dynamic_linker_impl(void * src, u_int vaddr)
 {
   assert((vaddr&1)==0);
   struct r4300_core* r4300 = &g_dev.r4300;
@@ -2588,7 +2621,7 @@ void *dynamic_linker(void * src, u_int vaddr)
   }
 
   int r=new_recompile_block(vaddr);
-  if(r==0) return dynamic_linker(src,vaddr);
+  if(r==0) return dynamic_linker_impl(src,vaddr);
   // Execute in unmapped page, generate pagefault execption
   assert(r4300->cp0.tlb.LUT_r[(vaddr&~1) >> 12] == 0);
   assert((intptr_t)r4300->new_dynarec_hot_state.memory_map[(vaddr&~1) >> 12] < 0);
@@ -2597,7 +2630,15 @@ void *dynamic_linker(void * src, u_int vaddr)
   return get_addr_ht(r4300->new_dynarec_hot_state.pcaddr);
 }
 
-void *dynamic_linker_ds(void * src, u_int vaddr)
+void *dynamic_linker(void * src, u_int vaddr)
+{
+  jit_write_begin();
+  void *ret = dynamic_linker_impl(src, vaddr);
+  jit_write_end();
+  return ret;
+}
+
+static void *dynamic_linker_ds_impl(void * src, u_int vaddr)
 {
   struct r4300_core* r4300 = &g_dev.r4300;
   struct ll_entry *head;
@@ -2646,13 +2687,21 @@ void *dynamic_linker_ds(void * src, u_int vaddr)
   }
 
   int r=new_recompile_block((vaddr&0xFFFFFFF8)+1);
-  if(r==0) return dynamic_linker_ds(src,vaddr);
+  if(r==0) return dynamic_linker_ds_impl(src,vaddr);
   // Execute in unmapped page, generate pagefault execption
   assert(r4300->cp0.tlb.LUT_r[(vaddr&~1) >> 12] == 0);
   assert((intptr_t)r4300->new_dynarec_hot_state.memory_map[(vaddr&~1) >> 12] < 0);
   r4300->delay_slot = vaddr&1;
   TLB_refill_exception(r4300, vaddr&~1, 2);
   return get_addr_ht(r4300->new_dynarec_hot_state.pcaddr);
+}
+
+void *dynamic_linker_ds(void * src, u_int vaddr)
+{
+  jit_write_begin();
+  void *ret = dynamic_linker_ds_impl(src, vaddr);
+  jit_write_end();
+  return ret;
 }
 
 // Get address from virtual address
@@ -2818,7 +2867,7 @@ static void invalidate_page(u_int page)
   }
 }
 
-void invalidate_block(u_int block)
+static void invalidate_block_impl(u_int block)
 {
   u_int page;
   page=block^0x80000;
@@ -2893,11 +2942,19 @@ void invalidate_block(u_int block)
   #endif
 }
 
+void invalidate_block(u_int block)
+{
+  jit_write_begin();
+  invalidate_block_impl(block);
+  jit_write_end();
+}
+
 // This is called when loading a save state.
 // Anything could have changed, so invalidate everything.
 static void invalidate_all_pages(void)
 {
   u_int page;
+  jit_write_begin();
   for(page=0;page<4096;page++)
     invalidate_page(page);
   for(page=0;page<1048576;page++)
@@ -2910,6 +2967,7 @@ static void invalidate_all_pages(void)
   #if NEW_DYNAREC >= NEW_DYNAREC_ARM
   cache_flush((char *)base_addr_rx,(char *)base_addr_rx+(1<<TARGET_SIZE_2));
   #endif
+  jit_write_end();
   #ifdef USE_MINI_HT
   memset(g_dev.r4300.new_dynarec_hot_state.mini_ht,-1,sizeof(g_dev.r4300.new_dynarec_hot_state.mini_ht));
   #endif
@@ -3732,7 +3790,7 @@ static void wb_invalidate(signed char pre[],signed char entry[],uint64_t dirty,u
 {
   int hr;
   for(hr=0;hr<HOST_REGS;hr++) {
-    if(hr!=EXCLUDE_REG) {
+    if(!IS_EXCLUDED_REG(hr)) {
       if(pre[hr]!=entry[hr]) {
         if(pre[hr]>=0) {
           if((dirty>>hr)&1) {
@@ -3758,7 +3816,7 @@ static void wb_invalidate(signed char pre[],signed char entry[],uint64_t dirty,u
   }
   // Move from one register to another (no writeback)
   for(hr=0;hr<HOST_REGS;hr++) {
-    if(hr!=EXCLUDE_REG) {
+    if(!IS_EXCLUDED_REG(hr)) {
       if(pre[hr]!=entry[hr]) {
         if(pre[hr]>=0&&(pre[hr]&63)<TEMPREG) {
           int nr;
@@ -3780,7 +3838,7 @@ static void wb_dirtys(signed char i_regmap[],uint64_t i_is32,uint64_t i_dirty)
 {
   int hr;
   for(hr=0;hr<HOST_REGS;hr++) {
-    if(hr!=EXCLUDE_REG) {
+    if(!IS_EXCLUDED_REG(hr)) {
       if(((i_regmap[hr]&63)>0)&&((i_regmap[hr]&63)<CSREG)) {
         if((i_dirty>>hr)&1) {
           if(i_regmap[hr]<64) {
@@ -3812,7 +3870,7 @@ static void wb_needed_dirtys(signed char i_regmap[],uint64_t i_is32,uint64_t i_d
   int hr;
   int t=(addr-start)>>2;
   for(hr=0;hr<HOST_REGS;hr++) {
-    if(hr!=EXCLUDE_REG) {
+    if(!IS_EXCLUDED_REG(hr)) {
       if(((i_regmap[hr]&63)>0)&&((i_regmap[hr]&63)<CSREG)) {
         if(i_regmap[hr]==regs[t].regmap_entry[hr] && ((regs[t].dirty>>hr)&1) && !(((i_is32&~regs[t].was32&~unneeded_reg_upper[t])>>(i_regmap[hr]&63))&1)) {
           if((i_dirty>>hr)&1) {
@@ -3849,7 +3907,7 @@ static void wb_sx(signed char pre[],signed char entry[],uint64_t dirty,uint64_t 
   if(is32_pre==is32) return;
   int hr,reg;
   for(hr=0;hr<HOST_REGS;hr++) {
-    if(hr!=EXCLUDE_REG) {
+    if(!IS_EXCLUDED_REG(hr)) {
       //if(pre[hr]==entry[hr]) {
         if((reg=pre[hr])>=0) {
           if((dirty>>hr)&1) {
@@ -3869,7 +3927,7 @@ static void wb_valid(signed char pre[],signed char entry[],u_int dirty_pre,u_int
   //if(dirty_pre==dirty) return;
   int hr,reg;
   for(hr=0;hr<HOST_REGS;hr++) {
-    if(hr!=EXCLUDE_REG) {
+    if(!IS_EXCLUDED_REG(hr)) {
       reg=pre[hr];
       if(((~u)>>(reg&63))&1) {
         if(((reg&63)>0)&&((reg&63)<CSREG)) {
@@ -3896,7 +3954,7 @@ static void wb_register(signed char r,signed char regmap[],uint64_t dirty,uint64
 {
   int hr;
   for(hr=0;hr<HOST_REGS;hr++) {
-    if(hr!=EXCLUDE_REG) {
+    if(!IS_EXCLUDED_REG(hr)) {
       if((regmap[hr]&63)==r) {
         if((dirty>>hr)&1) {
           if(regmap[hr]<64) {
@@ -3922,7 +3980,7 @@ static void store_regs_bt(signed char i_regmap[],uint64_t i_is32,uint64_t i_dirt
     int t=(addr-start)>>2;
     int hr;
     for(hr=0;hr<HOST_REGS;hr++) {
-      if(hr!=EXCLUDE_REG) {
+      if(!IS_EXCLUDED_REG(hr)) {
         if(((i_regmap[hr]&63)>0)&&((i_regmap[hr]&63)<CSREG)) {
           if(i_regmap[hr]!=regs[t].regmap_entry[hr] || !((regs[t].dirty>>hr)&1) || (((i_is32&~regs[t].was32&~unneeded_reg_upper[t])>>(i_regmap[hr]&63))&1)) {
             if((i_dirty>>hr)&1) {
@@ -3974,7 +4032,7 @@ static void load_regs_bt(signed char i_regmap[],uint64_t i_is32,uint64_t i_dirty
     }
     // Load 32-bit regs
     for(hr=0;hr<HOST_REGS;hr++) {
-      if(hr!=EXCLUDE_REG&&regs[t].regmap_entry[hr]>=0&&regs[t].regmap_entry[hr]<TEMPREG) {
+      if(!IS_EXCLUDED_REG(hr)&&regs[t].regmap_entry[hr]>=0&&regs[t].regmap_entry[hr]<TEMPREG) {
         #ifdef DESTRUCTIVE_WRITEBACK
         if(i_regmap[hr]!=regs[t].regmap_entry[hr] || ( !((regs[t].dirty>>hr)&1) && ((i_dirty>>hr)&1) && (((i_is32&~unneeded_reg_upper[t])>>i_regmap[hr])&1) ) || (((i_is32&~regs[t].was32&~unneeded_reg_upper[t])>>(i_regmap[hr]&63))&1)) {
         #else
@@ -3992,7 +4050,7 @@ static void load_regs_bt(signed char i_regmap[],uint64_t i_is32,uint64_t i_dirty
     }
     //Load 64-bit regs
     for(hr=0;hr<HOST_REGS;hr++) {
-      if(hr!=EXCLUDE_REG&&regs[t].regmap_entry[hr]>=64&&regs[t].regmap_entry[hr]<TEMPREG+64) {
+      if(!IS_EXCLUDED_REG(hr)&&regs[t].regmap_entry[hr]>=64&&regs[t].regmap_entry[hr]<TEMPREG+64) {
         if(i_regmap[hr]!=regs[t].regmap_entry[hr]) {
           assert(regs[t].regmap_entry[hr]!=64);
           if((i_is32>>(regs[t].regmap_entry[hr]&63))&1) {
@@ -4033,7 +4091,7 @@ static void load_regs(signed char entry[],signed char regmap[],int is32,int rs1,
   int hr;
   // Load 32-bit regs
   for(hr=0;hr<HOST_REGS;hr++) {
-    if(hr!=EXCLUDE_REG&&regmap[hr]>=0) {
+    if(!IS_EXCLUDED_REG(hr)&&regmap[hr]>=0) {
       if(entry[hr]!=regmap[hr]) {
         if(regmap[hr]==rs1||regmap[hr]==rs2)
         {
@@ -4050,7 +4108,7 @@ static void load_regs(signed char entry[],signed char regmap[],int is32,int rs1,
   }
   //Load 64-bit regs
   for(hr=0;hr<HOST_REGS;hr++) {
-    if(hr!=EXCLUDE_REG&&regmap[hr]>=0) {
+    if(!IS_EXCLUDED_REG(hr)&&regmap[hr]>=0) {
       if(entry[hr]!=regmap[hr]) {
         if(regmap[hr]-64==rs1||regmap[hr]-64==rs2)
         {
@@ -4078,7 +4136,7 @@ static void load_consts(signed char pre[],signed char regmap[],int is32,int i)
   int hr;
   // Load 32-bit regs
   for(hr=0;hr<HOST_REGS;hr++) {
-    if(hr!=EXCLUDE_REG&&regmap[hr]>=0) {
+    if(!IS_EXCLUDED_REG(hr)&&regmap[hr]>=0) {
       //if(entry[hr]!=regmap[hr]) {
       if(i==0||!((regs[i-1].isconst>>hr)&1)||pre[hr]!=regmap[hr]||bt[i]) {
         if(((regs[i].isconst>>hr)&1)&&regmap[hr]<64&&regmap[hr]>0) {
@@ -4097,7 +4155,7 @@ static void load_consts(signed char pre[],signed char regmap[],int is32,int i)
   }
   // Load 64-bit regs
   for(hr=0;hr<HOST_REGS;hr++) {
-    if(hr!=EXCLUDE_REG&&regmap[hr]>=0) {
+    if(!IS_EXCLUDED_REG(hr)&&regmap[hr]>=0) {
       //if(entry[hr]!=regmap[hr]) {
       if(i==0||!((regs[i-1].isconst>>hr)&1)||pre[hr]!=regmap[hr]||bt[i]) {
         if(((regs[i].isconst>>hr)&1)&&regmap[hr]>64) {
@@ -4129,7 +4187,7 @@ static void load_all_consts(signed char regmap[],int is32,u_int dirty,u_int isco
   int hr;
   // Load 32-bit regs
   for(hr=0;hr<HOST_REGS;hr++) {
-    if(hr!=EXCLUDE_REG&&regmap[hr]>=0&&((dirty>>hr)&1)) {
+    if(!IS_EXCLUDED_REG(hr)&&regmap[hr]>=0&&((dirty>>hr)&1)) {
       if(((isconst>>hr)&1)&&regmap[hr]<64&&regmap[hr]>0) {
         int value=constmap[i][hr];
         if(value==0) {
@@ -4143,7 +4201,7 @@ static void load_all_consts(signed char regmap[],int is32,u_int dirty,u_int isco
   }
   // Load 64-bit regs
   for(hr=0;hr<HOST_REGS;hr++) {
-    if(hr!=EXCLUDE_REG&&regmap[hr]>=0&&((dirty>>hr)&1)) {
+    if(!IS_EXCLUDED_REG(hr)&&regmap[hr]>=0&&((dirty>>hr)&1)) {
       if(((isconst>>hr)&1)&&regmap[hr]>64) {
         if((is32>>(regmap[hr]&63))&1) {
           int lr=get_reg(regmap,regmap[hr]-64);
@@ -4170,7 +4228,7 @@ static void load_all_regs(signed char i_regmap[])
 {
   int hr;
   for(hr=0;hr<HOST_REGS;hr++) {
-    if(hr!=EXCLUDE_REG) {
+    if(!IS_EXCLUDED_REG(hr)) {
       if(i_regmap[hr]==0) {
         emit_zeroreg(hr);
       }
@@ -4188,7 +4246,7 @@ static void load_needed_regs(signed char i_regmap[],signed char next_regmap[])
 {
   int hr;
   for(hr=0;hr<HOST_REGS;hr++) {
-    if(hr!=EXCLUDE_REG) {
+    if(!IS_EXCLUDED_REG(hr)) {
       if(get_reg(next_regmap,i_regmap[hr])>=0) {
         if(i_regmap[hr]==0) {
           emit_zeroreg(hr);
@@ -4252,7 +4310,7 @@ static void loop_preload(signed char pre[],signed char entry[])
 {
   int hr;
   for(hr=0;hr<HOST_REGS;hr++) {
-    if(hr!=EXCLUDE_REG) {
+    if(!IS_EXCLUDED_REG(hr)) {
       if(pre[hr]!=entry[hr]) {
         if(entry[hr]>=0) {
           if(get_reg(pre,entry[hr])<0) {
@@ -4574,7 +4632,7 @@ static void do_ccstub(int n)
       int addr,alt,ntaddr;
       while(hr<HOST_REGS)
       {
-        if(hr!=EXCLUDE_REG && hr!=HOST_CCREG &&
+        if(!IS_EXCLUDED_REG(hr) && hr!=HOST_CCREG &&
            (branch_regs[i].regmap[hr]&63)!=rs1[i] &&
            (branch_regs[i].regmap[hr]&63)!=rs2[i] )
         {
@@ -4584,7 +4642,7 @@ static void do_ccstub(int n)
       }
       while(hr<HOST_REGS)
       {
-        if(hr!=EXCLUDE_REG && hr!=HOST_CCREG &&
+        if(!IS_EXCLUDED_REG(hr) && hr!=HOST_CCREG &&
            (branch_regs[i].regmap[hr]&63)!=rs1[i] &&
            (branch_regs[i].regmap[hr]&63)!=rs2[i] )
         {
@@ -4596,7 +4654,7 @@ static void do_ccstub(int n)
       {
         while(hr<HOST_REGS)
         {
-          if(hr!=EXCLUDE_REG && hr!=HOST_CCREG &&
+          if(!IS_EXCLUDED_REG(hr) && hr!=HOST_CCREG &&
              (branch_regs[i].regmap[hr]&63)!=rs1[i] &&
              (branch_regs[i].regmap[hr]&63)!=rs2[i] )
           {
@@ -8212,7 +8270,7 @@ static void pagespan_assemble(int i,struct regstat *i_regs)
   else {
     while(hr<HOST_REGS)
     {
-      if(hr!=EXCLUDE_REG && hr!=HOST_CCREG &&
+      if(!IS_EXCLUDED_REG(hr) && hr!=HOST_CCREG &&
          (i_regs->regmap[hr]&63)!=rs1[i] &&
          (i_regs->regmap[hr]&63)!=rs2[i] )
       {
@@ -8223,7 +8281,7 @@ static void pagespan_assemble(int i,struct regstat *i_regs)
   }
   while(hr<HOST_REGS)
   {
-    if(hr!=EXCLUDE_REG && hr!=HOST_CCREG && hr!=HOST_BTREG &&
+    if(!IS_EXCLUDED_REG(hr) && hr!=HOST_CCREG && hr!=HOST_BTREG &&
        (i_regs->regmap[hr]&63)!=rs1[i] &&
        (i_regs->regmap[hr]&63)!=rs2[i] )
     {
@@ -8235,7 +8293,7 @@ static void pagespan_assemble(int i,struct regstat *i_regs)
   {
     while(hr<HOST_REGS)
     {
-      if(hr!=EXCLUDE_REG && hr!=HOST_CCREG && hr!=HOST_BTREG &&
+      if(!IS_EXCLUDED_REG(hr) && hr!=HOST_CCREG && hr!=HOST_BTREG &&
          (i_regs->regmap[hr]&63)!=rs1[i] &&
          (i_regs->regmap[hr]&63)!=rs2[i] )
       {
@@ -8652,8 +8710,18 @@ void new_dynarec_init(void)
 // Default to fixed cache address
 #ifdef HAVE_LIBNX
 #define CACHE_ADDR DOUBLE_CACHE_ADDR
+#elif defined(__APPLE__)
+// Apple Silicon requires a fresh MAP_JIT mapping for the code cache
+// (static memory cannot be made executable), so the cache address is dynamic.
+// It must stay ONE mapping: an RW alias of executable memory (the shm
+// DOUBLE_CACHE_ADDR shape, or a vm_remap of it) hard-hangs an M4 Max.
+#define CACHE_ADDR DYNAMIC_CACHE_ADDR
 #else
 #define CACHE_ADDR FIXED_CACHE_ADDR
+#endif
+
+#if defined(__APPLE__) && CACHE_ADDR!=DYNAMIC_CACHE_ADDR
+#error "Apple: the dynarec code cache must be the single MAP_JIT mapping of DYNAMIC_CACHE_ADDR"
 #endif
 
 #if CACHE_ADDR==DOUBLE_CACHE_ADDR
@@ -8690,7 +8758,11 @@ void new_dynarec_init(void)
 #else /*DYNAMIC_CACHE_ADDR*/
   base_addr = mmap (NULL, 1<<TARGET_SIZE_2,
                     PROT_READ | PROT_WRITE | PROT_EXEC,
-                    MAP_PRIVATE | MAP_ANONYMOUS,
+                    MAP_PRIVATE | MAP_ANONYMOUS
+#if defined(__APPLE__) && defined(__aarch64__)
+                    | MAP_JIT
+#endif
+                    ,
                     -1, 0);
   base_addr_rx = base_addr;
 #endif
@@ -8781,7 +8853,7 @@ void new_dynarec_cleanup(void)
 #endif
 }
 
-int new_recompile_block(int addr)
+static int new_recompile_block_impl(int addr)
 {
 #if defined(RECOMPILER_DEBUG) && !defined(RECOMP_DBG)
   recomp_dbg_block(addr);
@@ -10374,7 +10446,7 @@ int new_recompile_block(int addr)
       memcpy(constmap[i],current.constmap,sizeof(current.constmap));
     }
     for(hr=0;hr<HOST_REGS;hr++) {
-      if(hr!=EXCLUDE_REG&&regs[i].regmap[hr]>=0) {
+      if(!IS_EXCLUDED_REG(hr)&&regs[i].regmap[hr]>=0) {
         if(regmap_pre[i][hr]!=regs[i].regmap[hr]) {
           regs[i].wasconst&=~(1<<hr);
         }
@@ -10928,7 +11000,7 @@ int new_recompile_block(int addr)
       // Non branch or undetermined branch target
       for(hr=0;hr<HOST_REGS;hr++)
       {
-        if(hr!=EXCLUDE_REG) {
+        if(!IS_EXCLUDED_REG(hr)) {
           if(regs[i].regmap[hr]>64) {
             if(!((regs[i].dirty>>hr)&1))
               f_regmap[hr]=regs[i].regmap[hr];
@@ -11083,7 +11155,7 @@ int new_recompile_block(int addr)
       if(itype[i]==LOAD||itype[i]==LOADLR||
          itype[i]==STORE||itype[i]==STORELR||itype[i]==C1LS) {
         for(hr=0;hr<HOST_REGS;hr++) {
-          if(hr!=EXCLUDE_REG) {
+          if(!IS_EXCLUDED_REG(hr)) {
             end[hr]=i-1;
             for(j=i;j<slen-1;j++) {
               if(regs[j].regmap[hr]>=0) break;
@@ -11137,7 +11209,7 @@ int new_recompile_block(int addr)
         // Find highest score and allocate that register
         int maxscore=0;
         for(hr=0;hr<HOST_REGS;hr++) {
-          if(hr!=EXCLUDE_REG) {
+          if(!IS_EXCLUDED_REG(hr)) {
             if(score[hr]>score[maxscore]) {
               maxscore=hr;
               //DebugMessage(M64MSG_VERBOSE, "highest score: %d %d (%x->%x)",score[hr],hr,start+i*4,start+end[hr]*4);
@@ -11910,4 +11982,12 @@ int new_recompile_block(int addr)
     expirep=(expirep+1)&65535;
   }
   return 0;
+}
+
+int new_recompile_block(int addr)
+{
+  jit_write_begin();
+  int ret = new_recompile_block_impl(addr);
+  jit_write_end();
+  return ret;
 }
