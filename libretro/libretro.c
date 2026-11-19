@@ -1953,11 +1953,20 @@ bool retro_load_game(const struct retro_game_info *game)
 
 #ifdef NEW_DYNAREC
     {
-       /* retro-trainer PLAN-handheld HH-33: the dynarec's AOT form (new_dynarec_aot_configure),
-          read from the environment here and nowhere else, for every game this process loads */
+       /* retro-trainer PLAN-handheld HH-33/HH-36: the dynarec's AOT form (new_dynarec_aot_configure),
+          chosen here and nowhere else, for each game this process loads: the M64P_AOT* environment
+          when M64P_AOT is set (the Mac's tooling), else a load of the image the frontend names in
+          its `rt_aot_image` option (retro-trainer's, from the `aot` entries of cores.lock) */
        const char *corrupt = getenv("M64P_AOT_CORRUPT");
-       new_dynarec_aot_configure(getenv("M64P_AOT"), getenv("M64P_AOT_IMAGE"), getenv("M64P_AOT_LOG"),
-          corrupt ? (unsigned int)strtoul(corrupt, NULL, 16) : 0);
+       const char *mode = getenv("M64P_AOT"), *image = getenv("M64P_AOT_IMAGE");
+       struct retro_variable aot_var = { "rt_aot_image", NULL };
+       if (!(mode && *mode) && environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &aot_var) && aot_var.value && *aot_var.value)
+       {
+          mode = "load";
+          image = aot_var.value;
+       }
+       new_dynarec_aot_configure(mode, image, getenv("M64P_AOT_LOG"),
+          corrupt ? (unsigned int)strtoul(corrupt, NULL, 16) : 0, getenv("M64P_AOT_CORE_UUID"));
     }
 #endif
 

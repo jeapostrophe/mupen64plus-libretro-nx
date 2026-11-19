@@ -152,7 +152,13 @@ void run_r4300(struct r4300_core* r4300)
         rt_trace_stop();
     }
 #if defined(DYNAREC)
-    else if (r4300->emumode >= 2)
+    /* retro-trainer HH-36: an AOT image the core refuses, or no image on a build that cannot
+       JIT, runs the cached interpreter (the else arm) */
+    else if (r4300->emumode >= 2
+#ifdef NEW_DYNAREC
+             && new_dynarec_aot_admits()
+#endif
+            )
     {
         DebugMessage(M64MSG_INFO, "Starting R4300 emulator: Dynamic Recompiler");
         r4300->emumode = EMUMODE_DYNAREC;

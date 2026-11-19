@@ -12103,8 +12103,10 @@ int new_recompile_block(int addr)
 #if NEW_DYNAREC == NEW_DYNAREC_ARM64
 #include "arm64/aot_arm64.c"
 #else
-void new_dynarec_aot_configure(const char *mode, const char *image, const char *log, u_int corrupt)
+void new_dynarec_aot_configure(const char *mode, const char *image, const char *log, u_int corrupt,
+                               const char *core_uuid)
 {
-  (void)mode; (void)image; (void)log; (void)corrupt;
+  (void)mode; (void)image; (void)log; (void)corrupt; (void)core_uuid;
 }
+int new_dynarec_aot_admits(void) { return 1; }
 #endif
