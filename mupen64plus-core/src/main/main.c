@@ -1412,6 +1412,9 @@ m64p_error main_run(void)
 
     /* Seed MPK ID gen using current time */
     uint64_t mpk_seed = !netplay_is_init() ? (uint64_t)time(NULL) : 0;
+    /* LANE-ONLY DIAGNOSTIC (retro-trainer lane hh33b): M64P_MPK_SEED fixes the seed of the
+       controller paks' serials, which otherwise changes every second */
+    if (getenv("M64P_MPK_SEED")) mpk_seed = strtoull(getenv("M64P_MPK_SEED"), NULL, 0);
     l_mpk_idgen = xoshiro256pp_seed(mpk_seed);
 
     no_compiled_jump = 0; //ConfigGetParamBool(g_CoreConfig, "NoCompiledJump");
