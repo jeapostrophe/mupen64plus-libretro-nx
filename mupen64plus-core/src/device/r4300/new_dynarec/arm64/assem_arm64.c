@@ -30,6 +30,7 @@
 #define fp_ram_offset          (offsetof(struct new_dynarec_hot_state, ram_offset))
 #define fp_mini_ht             (offsetof(struct new_dynarec_hot_state, mini_ht))
 #define fp_memory_map          (offsetof(struct new_dynarec_hot_state, memory_map))
+#define fp_aot_imports         (offsetof(struct new_dynarec_hot_state, aot_imports))
 
 typedef enum {
   COND_EQ,
@@ -78,6 +79,7 @@ void jump_vaddr_x26(void);
 void jump_vaddr_x27(void);
 void jump_vaddr_x28(void);
 void breakpoint(void);
+void verify_code_aot(void);
 static void invalidate_addr(u_int addr);
 
 static uintptr_t literals[1024][2];
@@ -955,6 +957,10 @@ static u_int genjmp(intptr_t addr)
     out_rx=((intptr_t)out-(intptr_t)base_addr)+(intptr_t)base_addr_rx;
 
   intptr_t offset=addr-out_rx;
+  /* AOT shape: a direct branch only ever stays inside the block (emit_call and emit_jmp take
+     the helpers through aot_imports), so it can never need the cache's trampoline table */
+  AOT_CHECK(!aot_mode||(offset>=-(intptr_t)MAX_OUTPUT_BLOCK_SIZE&&offset<(intptr_t)MAX_OUTPUT_BLOCK_SIZE),
+            "a branch out of an AOT-shaped block to %llx",(unsigned long long)addr);
   if(offset<-134217728LL||offset>=134217728LL)
   {
     int n;
@@ -2013,8 +2019,33 @@ static void emit_set_if_carry64_32(int u1, int l1, int u2, int l2, int rt)
   emit_cmovb_imm(1,rt);
 }
 
+/* retro-trainer HH-33: the index of helper `a` in aot_imports (the cache's trampoline table,
+   jump_table_symbols, in its order, then verify_code_aot), or -1 when `a` is no helper. */
+#define AOT_IMPORT_COUNT (sizeof(jump_table_symbols)/sizeof(jump_table_symbols[0])+1)
+static int aot_import_index(intptr_t a)
+{
+  size_t n;
+  if(a==(intptr_t)verify_code_aot) return AOT_IMPORT_COUNT-1;
+  for(n=0;n<AOT_IMPORT_COUNT-1;n++)
+    if(jump_table_symbols[n]==(uintptr_t)a) return (int)n;
+  return -1;
+}
+
+/* An AOT-shaped call or jump to helper n: ldr x16,[fp,#aot_imports[n]]; blr/br x16. x16 is
+   the trampoline register, which register allocation never hands out on Apple. */
+static void emit_aot_import_branch(int n, u_int op)
+{
+  intptr_t offset=fp_aot_imports+n*sizeof(uintptr_t);
+  AOT_CHECK(offset<32760&&(offset&7)==0,"aot_imports[%d] is out of ldr's reach",n);
+  assem_debug("ldr x16,fp+%d; %s x16",offset,op==0xd63f0000?"blr":"br");
+  output_w32(0xf9400000|((offset>>3)<<10)|(FP<<5)|TRAMPOLINE_REG);
+  output_w32(op|(TRAMPOLINE_REG<<5));
+}
+
 static void emit_call(intptr_t a)
 {
+  int n;
+  if(aot_mode&&(n=aot_import_index(a))>=0) { emit_aot_import_branch(n,0xd63f0000); return; }
   assem_debug("bl %x (%x+%x)",a,(intptr_t)out,a-(intptr_t)out);
   u_int offset=genjmp(a);
   output_w32(0x94000000|offset);
@@ -2022,6 +2053,8 @@ static void emit_call(intptr_t a)
 
 static void emit_jmp(intptr_t a)
 {
+  int n;
+  if(aot_mode&&(n=aot_import_index(a))>=0) { emit_aot_import_branch(n,0xd61f0000); return; }
   assem_debug("b %x (%x+%x)",a,(intptr_t)out,a-(intptr_t)out);
   u_int offset=genjmp(a);
   output_w32(0x14000000|offset);
@@ -3121,9 +3154,27 @@ static void do_invstub(int n)
   emit_jmp(stubs[n][2]); // return address
 }
 
+/* AOT shape: the stub names itself PC-relatively (adr x0,.) and by guest address, and
+   verify_dirty_at finds its ll_entry, so no heap pointer is baked into the code. */
+static void emit_aot_dirty_stub_call(struct ll_entry *head)
+{
+  emit_adr((intptr_t)out,ARG1_REG);
+  emit_movz_lsl16((head->vaddr>>16)&0xffff,ARG2_REG);
+  emit_movk(head->vaddr&0xffff,ARG2_REG);
+  emit_call((intptr_t)verify_code_aot);
+}
+
 static intptr_t do_dirty_stub(int i, struct ll_entry * head)
 {
   assem_debug("do_dirty_stub %x",head->vaddr);
+  if(aot_mode) {
+    emit_aot_dirty_stub_call(head);
+    intptr_t entry=(intptr_t)out;
+    load_regs_entry(i);
+    if(entry==(intptr_t)out) entry=instr_addr[i];
+    emit_jmp(instr_addr[i]);
+    return entry;
+  }
   intptr_t out_rx=((intptr_t)out-(intptr_t)base_addr)+(intptr_t)base_addr_rx;
   intptr_t offset=(((intptr_t)head&~0xfffLL)-((intptr_t)out_rx&~0xfffLL));
 
@@ -3149,6 +3200,7 @@ static intptr_t do_dirty_stub(int i, struct ll_entry * head)
 static void do_dirty_stub_ds(struct ll_entry *head)
 {
   assem_debug("do_dirty_stub_ds %x",head->vaddr);
+  if(aot_mode) { emit_aot_dirty_stub_call(head); return; }
   intptr_t out_rx=((intptr_t)out-(intptr_t)base_addr)+(intptr_t)base_addr_rx;
   intptr_t offset=(((intptr_t)head&~0xfffLL)-((intptr_t)out_rx&~0xfffLL));
 
@@ -4610,6 +4662,13 @@ static void arch_init(void) {
   jump_table_symbols[7] = (intptr_t)cached_interp_DMULTU;
   jump_table_symbols[8] = (intptr_t)cached_interp_DDIV;
   jump_table_symbols[9] = (intptr_t)cached_interp_DDIVU;
+
+  // retro-trainer HH-33: aot_imports, the same helpers by index
+  AOT_CHECK(AOT_IMPORT_COUNT<=sizeof(g_dev.r4300.new_dynarec_hot_state.aot_imports)/sizeof(uintptr_t),
+            "%d helpers do not fit aot_imports",(int)AOT_IMPORT_COUNT);
+  memcpy(g_dev.r4300.new_dynarec_hot_state.aot_imports,jump_table_symbols,sizeof(jump_table_symbols));
+  g_dev.r4300.new_dynarec_hot_state.aot_imports[AOT_IMPORT_COUNT-1]=(uintptr_t)verify_code_aot;
+  if(aot_mode==AOT_LOAD) return; // no code cache, so no trampolines
 
   // Trampolines for jumps >128MB
   intptr_t *ptr,*ptr2,*ptr3;
