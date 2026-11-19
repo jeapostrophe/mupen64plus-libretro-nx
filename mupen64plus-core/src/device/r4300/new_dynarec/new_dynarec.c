@@ -62,12 +62,17 @@
  * - "emit": re-emits the blocks of M64P_AOT_BLOCKS (a shape run's log) into an image
  *   (M64P_AOT_OUT.code, .meta) in plain RW memory, never executed, then exits the process.
  * - "load": runs from the image dylib M64P_AOT_IMAGE: no code cache is mapped, and a block is
- *   installed from the image where the JIT would compile it (aot_install).
+ *   installed from the image where the JIT would compile it (aot_install); a block the image
+ *   lacks stops the process.
+ * - "hybrid": "shape" with the image of "load" installed first, a miss compiled by the JIT and
+ *   counted (and logged to M64P_AOT_LOG): a measurement of an image on a run it was not made
+ *   from, on the Mac only, since it maps the JIT's cache.
  * The image format and its checks are aot_image_header's. */
 #define AOT_OFF 0
 #define AOT_SHAPE 1
-#define AOT_EMIT 2
-#define AOT_LOAD 3
+#define AOT_HYBRID 2
+#define AOT_EMIT 3
+#define AOT_LOAD 4
 static int aot_mode;
 #define AOT_CHECK(cond, ...) do { if(!(cond)) { fprintf(stderr, "new_dynarec AOT: " __VA_ARGS__); \
   fputc('\n', stderr); abort(); } } while (0)
@@ -80,6 +85,12 @@ static void aot_init(void);
 static void aot_report(const char *when);
 static u_int *aot_emit_source;   // emit: the words of the block being re-emitted
 static u_char *aot_block_end;    // the end of the block just compiled, before `out` wraps
+/* The compiler state a block's code depends on besides its words, as it stood when the compile
+ * began: using_tlb, and stop_after_jal (a savestate carries it, and it ends a block after a JAL). */
+#define AOT_FLAG_TLB 1
+#define AOT_FLAG_STOP_AFTER_JAL 2
+static u_int aot_compile_flags;
+static u_int aot_flags_now(void);
 
 #if defined(__APPLE__) && defined(__aarch64__)
 /* Apple Silicon enforces W^X: the MAP_JIT code cache is executable by
@@ -12071,6 +12082,8 @@ static int new_recompile_block_impl(int addr)
 int new_recompile_block(int addr)
 {
   if(aot_mode==AOT_LOAD) return aot_install(addr);
+  if(aot_mode==AOT_HYBRID) { int r=aot_install(addr); if(r>=0) return r; } // else the JIT compiles it
+  aot_compile_flags=aot_flags_now();
   jit_write_begin();
   int ret = new_recompile_block_impl(addr);
   jit_write_end();
@@ -12087,7 +12100,7 @@ int new_recompile_block(int addr)
 #endif
 
 /* The image's meta file, words little-endian: this header, then per block
- *   addr, slen, code_off, code_len, nentries, using_tlb, words[slen+1],
+ *   addr, slen, code_off, code_len, nentries, flags (AOT_FLAG_*), words[slen+1],
  *   entries[nentries] of (vaddr, reg32, dirty_off, clean_off, ht_replace).
  * The fields after `version` are the fingerprint a load refuses a mismatch of: the hot state's
  * layout the code addresses off FP, the import table's length, and the timing constants the
@@ -12102,16 +12115,21 @@ struct aot_image_header {
 
 struct aot_entry { u_int vaddr, reg32, dirty_off, clean_off, ht_replace; };
 struct aot_block {
-  u_int addr, slen, code_off, code_len, nentries, using_tlb;
+  u_int addr, slen, code_off, code_len, nentries, flags;
   const u_int *words;               // slen+1: the block's words and the one its end looked at
   const struct aot_entry *entries;
 };
 
 static struct {
-  unsigned long compiled, wraps, installs, lookahead, orphans, emitted, emit_skipped, emit_differs;
+  unsigned long flag_differs, compiled, wraps, installs, misses, lookahead, orphans, emitted, emit_skipped, emit_differs;
 } aot_stats;
 
 static struct aot_entry aot_entries[MAXBLOCK+1]; // the entry points of the block being compiled
+
+static u_int aot_flags_now(void)
+{
+  return (using_tlb?AOT_FLAG_TLB:0)|(stop_after_jal?AOT_FLAG_STOP_AFTER_JAL:0);
+}
 static int aot_entry_count;
 
 static int aot_mode_from_env(void)
@@ -12121,7 +12139,8 @@ static int aot_mode_from_env(void)
   if(!strcmp(m,"shape")) return AOT_SHAPE;
   if(!strcmp(m,"emit")) return AOT_EMIT;
   if(!strcmp(m,"load")) return AOT_LOAD;
-  AOT_CHECK(0,"M64P_AOT=%s is none of shape, emit, load",m);
+  if(!strcmp(m,"hybrid")) return AOT_HYBRID;
+  AOT_CHECK(0,"M64P_AOT=%s is none of shape, emit, load, hybrid",m);
   return AOT_OFF;
 }
 
@@ -12139,7 +12158,8 @@ void *new_dyna_first_block(void)
 
 static int aot_expiring(void *addr)
 {
-  if(aot_mode==AOT_LOAD) return 0; // an image block is never overwritten
+  // an image block is never overwritten: only the cache's blocks expire
+  if((uintptr_t)addr-(uintptr_t)base_addr>=(uintptr_t)1<<TARGET_SIZE_2) return 0;
   return !((((uintptr_t)addr-(uintptr_t)out)<<(32-TARGET_SIZE_2))>0x60000000+(MAX_OUTPUT_BLOCK_SIZE<<(32-TARGET_SIZE_2)));
 }
 
@@ -12184,6 +12204,8 @@ static u_char *aot_out_code; static size_t aot_out_code_len, aot_out_code_cap;
 static u_int *aot_out_meta; static size_t aot_out_meta_len, aot_out_meta_cap;
 static u_int aot_out_blocks;
 static uint64_t aot_emit_expect_hash; static u_int aot_emit_expect_len;
+static const u_int *aot_emit_true_words; // the words the image records (the source, unless corrupted)
+static int aot_emit_corrupting;
 
 static void aot_meta_push(u_int w)
 {
@@ -12209,13 +12231,14 @@ static void aot_block_compiled(int addr, uintptr_t beginning)
     aot_entries[k].dirty_off-=(u_int)beginning;
     aot_entries[k].clean_off-=(u_int)beginning;
   }
-  if(aot_mode==AOT_SHAPE&&aot_log) {
-    fprintf(aot_log,"%08x %d %d %u %016llx %d",(u_int)addr,slen,using_tlb?1:0,(u_int)len,(unsigned long long)h,n);
+  if((aot_mode==AOT_SHAPE||aot_mode==AOT_HYBRID)&&aot_log) {
+    fprintf(aot_log,"%08x %d %u %u %016llx %d",(u_int)addr,slen,aot_compile_flags,(u_int)len,(unsigned long long)h,n);
     for(k=0;k<=slen;k++) fprintf(aot_log," %08x",source[k]);
     fputc('\n',aot_log);
   }
   if(aot_mode==AOT_EMIT) {
-    if(len!=aot_emit_expect_len||h!=aot_emit_expect_hash) {
+    if(aot_emit_corrupting) fprintf(stderr,"new_dynarec AOT emit: %08x re-emitted from corrupted words, on purpose\n",(u_int)addr);
+    else if(len!=aot_emit_expect_len||h!=aot_emit_expect_hash) {
       if(aot_stats.emit_differs++<10)
         fprintf(stderr,"new_dynarec AOT emit: %08x re-emits as %u bytes %016llx, the JIT ran %u bytes %016llx\n",
           (u_int)addr,(u_int)len,(unsigned long long)h,aot_emit_expect_len,(unsigned long long)aot_emit_expect_hash);
@@ -12229,8 +12252,8 @@ static void aot_block_compiled(int addr, uintptr_t beginning)
     memcpy(aot_out_code+off,(void*)beginning,len);
     aot_out_code_len+=len;
     aot_meta_push((u_int)addr); aot_meta_push((u_int)slen); aot_meta_push(off); aot_meta_push((u_int)len);
-    aot_meta_push((u_int)n); aot_meta_push(using_tlb?1:0);
-    for(k=0;k<=slen;k++) aot_meta_push(source[k]);
+    aot_meta_push((u_int)n); aot_meta_push(aot_compile_flags);
+    for(k=0;k<=slen;k++) aot_meta_push(aot_emit_true_words[k]);
     for(k=0;k<n;k++) {
       aot_meta_push(aot_entries[k].vaddr); aot_meta_push(aot_entries[k].reg32);
       aot_meta_push(aot_entries[k].dirty_off); aot_meta_push(aot_entries[k].clean_off);
@@ -12253,7 +12276,7 @@ static void aot_header(struct aot_image_header *h, u_int nblocks, u_int code_siz
 }
 
 /* emit: one block a shape log lists, as the record the log wrote */
-struct aot_record { u_int addr, slen, tlb, code_len, nentries; uint64_t code_hash, key; u_int *words; };
+struct aot_record { u_int addr, slen, flags, code_len, nentries; uint64_t code_hash, key; u_int *words; };
 
 static int aot_record_cmp(const void *a, const void *b)
 {
@@ -12274,7 +12297,7 @@ static void aot_emit_all(void)
   struct aot_record *recs=NULL;
   unsigned long long hash;
   struct aot_record r;
-  while(fscanf(f,"%x %u %u %u %llx %u",&r.addr,&r.slen,&r.tlb,&r.code_len,&hash,&r.nentries)==6) {
+  while(fscanf(f,"%x %u %u %u %llx %u",&r.addr,&r.slen,&r.flags,&r.code_len,&hash,&r.nentries)==6) {
     r.code_hash=hash;
     AOT_CHECK(r.slen>0&&r.slen<MAXBLOCK,"a block of %u words in %s",r.slen,in);
     r.words=(u_int*)calloc(r.slen+1+64,4); // zero past the logged words, which no compile reads
@@ -12287,12 +12310,34 @@ static void aot_emit_all(void)
   }
   fclose(f);
   qsort(recs,n,sizeof *recs,aot_record_cmp);
+  /* M64P_AOT_CORRUPT=<addr>: a red receipt for the image comparisons. The block at <addr> is
+     re-emitted with its first ADDIU's immediate one higher, while the image records its true
+     words, so the block installs and computes a wrong value. */
+  const char *corrupt=getenv("M64P_AOT_CORRUPT");
+  u_int corrupt_addr=corrupt?(u_int)strtoul(corrupt,NULL,16):0;
+  u_int *bad=NULL;
   size_t i,unique=0;
   for(i=0;i<n;i++) {
     if(i>0&&aot_record_cmp(&recs[i-1],&recs[i])==0) continue; // the same block compiled again
     unique++;
     aot_emit_source=recs[i].words;
-    using_tlb=recs[i].tlb;
+    aot_emit_true_words=recs[i].words;
+    aot_emit_corrupting=0;
+    if(corrupt&&recs[i].addr==corrupt_addr&&!bad) {
+      u_int k;
+      bad=(u_int*)calloc(recs[i].slen+1+64,4);
+      AOT_CHECK(bad,"out of memory");
+      memcpy(bad,recs[i].words,(recs[i].slen+1)*4);
+      for(k=0;k<recs[i].slen&&!((bad[k]>>26)==0x09&&((bad[k]>>16)&0x1f)!=0);k++); // an ADDIU that writes a register
+      AOT_CHECK(k<recs[i].slen,"the block at %08x holds no ADDIU to corrupt",corrupt_addr);
+      bad[k]=(bad[k]&0xffff0000)|((bad[k]+1)&0xffff);
+      fprintf(stderr,"new_dynarec AOT emit: corrupting %08x: word %u %08x -> %08x\n",corrupt_addr,k,recs[i].words[k],bad[k]);
+      aot_emit_source=bad;
+      aot_emit_corrupting=1;
+    }
+    using_tlb=(recs[i].flags&AOT_FLAG_TLB)!=0;
+    stop_after_jal=(recs[i].flags&AOT_FLAG_STOP_AFTER_JAL)!=0;
+    aot_compile_flags=recs[i].flags;
     aot_emit_expect_hash=recs[i].code_hash; aot_emit_expect_len=recs[i].code_len;
     aot_entry_count=0;
     if(new_recompile_block_impl((int)recs[i].addr)!=0) { aot_stats.emit_skipped++; continue; }
@@ -12356,9 +12401,9 @@ static void aot_report(const char *when)
 {
   if(aot_mode==AOT_OFF) return;
   fprintf(stderr,"new_dynarec AOT, %s: ",when);
-  fprintf(stderr,"new_dynarec AOT (%s): %lu compiled, %lu cache wraps, %lu installed, %lu lookahead differs, %lu orphan stubs\n",
-    aot_mode==AOT_SHAPE?"shape":aot_mode==AOT_LOAD?"load":"emit",
-    aot_stats.compiled,aot_stats.wraps,aot_stats.installs,aot_stats.lookahead,aot_stats.orphans);
+  fprintf(stderr,"new_dynarec AOT (%s): %lu compiled, %lu cache wraps, %lu installed, %lu missed, %lu passed over for their compile flags, %lu lookahead differs, %lu orphan stubs\n",
+    aot_mode==AOT_SHAPE?"shape":aot_mode==AOT_LOAD?"load":aot_mode==AOT_HYBRID?"hybrid":"emit",
+    aot_stats.compiled,aot_stats.wraps,aot_stats.installs,aot_stats.misses,aot_stats.flag_differs,aot_stats.lookahead,aot_stats.orphans);
   if(aot_log) fflush(aot_log);
   aot_vm_report(when);
 }
@@ -12389,7 +12434,7 @@ static void aot_load_image(void)
   for(i=0;i<aot_nblocks;i++) {
     struct aot_block *b=&aot_blocks[i];
     AOT_CHECK(p+6<=meta_end,"%s: meta ends inside block %u",path,i);
-    b->addr=p[0]; b->slen=p[1]; b->code_off=p[2]; b->code_len=p[3]; b->nentries=p[4]; b->using_tlb=p[5];
+    b->addr=p[0]; b->slen=p[1]; b->code_off=p[2]; b->code_len=p[3]; b->nentries=p[4]; b->flags=p[5];
     b->words=p+6;
     b->entries=(const struct aot_entry*)(p+6+b->slen+1);
     p+=6+b->slen+1+5*b->nentries;
@@ -12403,12 +12448,12 @@ static void aot_load_image(void)
 static void aot_init(void)
 {
   if(aot_mode==AOT_OFF) return;
-  if(aot_mode==AOT_SHAPE) {
+  if(aot_mode==AOT_SHAPE||aot_mode==AOT_HYBRID) {
     const char *path=getenv("M64P_AOT_LOG");
     if(path&&*path&&!aot_log) { aot_log=fopen(path,"w"); AOT_CHECK(aot_log,"cannot write %s",path); }
   }
   if(aot_mode==AOT_EMIT) aot_emit_all();
-  if(aot_mode==AOT_LOAD) { aot_load_image(); aot_vm_report("image loaded"); }
+  if(aot_mode==AOT_LOAD||aot_mode==AOT_HYBRID) { aot_load_image(); aot_vm_report("image loaded"); }
 }
 
 /* load: where the JIT would compile the block at `addr`, install the image's block that starts
@@ -12436,6 +12481,8 @@ static int aot_install(int addr)
     for(;b<aot_blocks+aot_nblocks&&b->addr==(u_int)addr;b++) {
       candidates++;
       if(memcmp(src,b->words,b->slen*4)) continue;
+      // compiled under other compiler state: the JIT would compile it otherwise now
+      if(b->flags!=aot_flags_now()) { aot_stats.flag_differs++; continue; }
       if(src[b->slen]!=b->words[b->slen]) aot_stats.lookahead++;
       u_int len=b->slen*4, k;
       char *cp=(char*)malloc(len+4);
@@ -12476,6 +12523,8 @@ static int aot_install(int addr)
       return 0;
     }
   }
+  aot_stats.misses++;
+  if(aot_mode==AOT_HYBRID) return -1;
   AOT_CHECK(0,"miss at %08x: the image holds %d block(s) starting there, none with its words (%08x %08x %08x %08x)",
     (u_int)addr,candidates,src[0],src[1],src[2],src[3]);
   return 1;
