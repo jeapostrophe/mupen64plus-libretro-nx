@@ -61,6 +61,9 @@
 #define AOT_HYBRID 2
 #define AOT_EMIT 3
 #define AOT_LOAD 4
+#define AOT_INTERP 5
+#define AOT_IMAGE_ONLY(m) ((m)==AOT_LOAD||(m)==AOT_INTERP) // no code cache: blocks come from the image
+#define AOT_INTERPRET 2 // new_recompile_block's: the image lacks it, aot_interp_entry interprets it
 #if NEW_DYNAREC == NEW_DYNAREC_ARM64
 static int aot_mode;
 #define AOT_CHECK(cond, ...) do { if(!(cond)) { fprintf(stderr, "new_dynarec AOT: " __VA_ARGS__); \
@@ -70,6 +73,7 @@ static void aot_init(void);
 static void aot_cleanup(void);
 static int aot_maps_no_cache(void);
 static int aot_from_image(int addr, int *ret);
+static void *aot_interpret_entry(int r);
 static void aot_compile_begin(u_int **psource);
 static void aot_note_entry(u_int vaddr, u_int reg32, void *dirty, void *clean, int ht_replace);
 static void aot_note_block_end(u_char *end);
@@ -81,6 +85,7 @@ static void aot_block_compiled(int addr, uintptr_t beginning);
 #define aot_cleanup() ((void)0)
 #define aot_maps_no_cache() 0
 #define aot_from_image(addr, ret) 0
+#define aot_interpret_entry(r) NULL
 #define aot_compile_begin(psource) ((void)0)
 #define aot_note_entry(vaddr, reg32, dirty, clean, ht_replace) ((void)0)
 #define aot_note_block_end(end) ((void)0)
@@ -2709,6 +2714,7 @@ static void *dynamic_linker_impl(void * src, u_int vaddr)
 
   int r=new_recompile_block(vaddr);
   if(r==0) return dynamic_linker_impl(src,vaddr);
+  if(aot_interpret_entry(r)) return aot_interpret_entry(r);
   // Execute in unmapped page, generate pagefault execption
   assert(r4300->cp0.tlb.LUT_r[(vaddr&~1) >> 12] == 0);
   assert((intptr_t)r4300->new_dynarec_hot_state.memory_map[(vaddr&~1) >> 12] < 0);
@@ -2778,6 +2784,7 @@ static void *dynamic_linker_ds_impl(void * src, u_int vaddr)
 
   int r=new_recompile_block((vaddr&0xFFFFFFF8)+1);
   if(r==0) return dynamic_linker_ds_impl(src,vaddr);
+  if(aot_interpret_entry(r)) return aot_interpret_entry(r);
   // Execute in unmapped page, generate pagefault execption
   assert(r4300->cp0.tlb.LUT_r[(vaddr&~1) >> 12] == 0);
   assert((intptr_t)r4300->new_dynarec_hot_state.memory_map[(vaddr&~1) >> 12] < 0);
@@ -2824,6 +2831,7 @@ void *get_addr(u_int vaddr)
 
   int r=new_recompile_block(vaddr);
   if(r==0) return get_addr(vaddr);
+  if(aot_interpret_entry(r)) return aot_interpret_entry(r);
   // Execute in unmapped page, generate pagefault execption
   assert(r4300->cp0.tlb.LUT_r[(vaddr&~1) >> 12] == 0);
   assert((intptr_t)r4300->new_dynarec_hot_state.memory_map[(vaddr&~1) >> 12] < 0);
@@ -2875,6 +2883,7 @@ void *get_addr_32(u_int vaddr,u_int flags)
 
   int r=new_recompile_block(vaddr);
   if(r==0) return get_addr(vaddr);
+  if(aot_interpret_entry(r)) return aot_interpret_entry(r);
   // Execute in unmapped page, generate pagefault execption
   assert(r4300->cp0.tlb.LUT_r[(vaddr&~1) >> 12] == 0);
   assert((intptr_t)r4300->new_dynarec_hot_state.memory_map[(vaddr&~1) >> 12] < 0);
@@ -8844,7 +8853,7 @@ void new_dynarec_init(void)
   base_addr = g_dev.r4300.extra_memory;
   base_addr_rx = base_addr;
 #else /*DYNAMIC_CACHE_ADDR*/
-  if(aot_mode==AOT_LOAD) {
+  if(AOT_IMAGE_ONLY(aot_mode)) {
     base_addr = base_addr_rx = NULL; // nothing is compiled: blocks come from the image
   } else if(aot_mode==AOT_EMIT) {
     // the re-emitted blocks are only ever written and copied out, never run: plain RW memory

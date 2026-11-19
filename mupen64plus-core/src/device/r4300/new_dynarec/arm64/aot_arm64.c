@@ -7,6 +7,10 @@
  * - "load": runs from the image dylib `image`: no code cache is mapped, and a block is installed
  *   from the image where the JIT would compile it (aot_install); a block the image lacks stops the
  *   process.
+ * - "interp": "load", but a block the image lacks is run on the interpreter, charging cycles as
+ *   the dynarec would have (aot_interp_run), and counted; the next block found is the image's again.
+ *   This is the mode for a device, which has no JIT. In an RT_TRACE build `corrupt` charges that many
+ *   cycles more at every interpreted branch (the red receipt for the cycle model).
  * And, in an RT_TRACE build only (the Mac's, whose tools make images; an iOS core carries load
  * alone):
  * - "shape": the JIT, emitting AOT-shaped code: no block linking, no check_addr stop to a block's
@@ -20,6 +24,7 @@
  *   counted (and logged to `log`): a measurement of an image on a run it was not made from.
  * The image format and its checks are aot_image_header's. */
 #include <dlfcn.h>
+#include "device/r4300/idec.h"
 #include <unistd.h>
 #if defined(RT_TRACE) && TARGET_OS_OSX // the iOS SDK has neither libproc.h nor mach_vm.h
 #include <mach/mach.h>
@@ -60,6 +65,7 @@ static struct { int mode; char *image, *log; u_int corrupt; } aot_cfg;
 
 static struct {
   unsigned long flag_differs, compiled, wraps, installs, misses, lookahead, orphans, emit_skipped, emit_differs;
+  unsigned long interp_runs, interp_insns, interp_addrs; // interp: entries, instructions, distinct miss addresses
 } aot_stats;
 
 static char *aot_strdup(const char *s)
@@ -75,13 +81,14 @@ void new_dynarec_aot_configure(const char *mode, const char *image, const char *
   int m=AOT_OFF;
   if(mode&&*mode) {
     if(!strcmp(mode,"load")) m=AOT_LOAD;
+    else if(!strcmp(mode,"interp")) m=AOT_INTERP;
 #ifdef RT_TRACE
     else if(!strcmp(mode,"shape")) m=AOT_SHAPE;
     else if(!strcmp(mode,"emit")) m=AOT_EMIT;
     else if(!strcmp(mode,"hybrid")) m=AOT_HYBRID;
-    else AOT_CHECK(0,"the mode %s is none of load, shape, emit, hybrid",mode);
+    else AOT_CHECK(0,"the mode %s is none of load, interp, shape, emit, hybrid",mode);
 #else
-    else AOT_CHECK(0,"the mode %s is not load, the only one a build without RT_TRACE has",mode);
+    else AOT_CHECK(0,"the mode %s is neither load nor interp, the only ones a build without RT_TRACE has",mode);
 #endif
   }
   aot_cfg.mode=m;
@@ -90,15 +97,21 @@ void new_dynarec_aot_configure(const char *mode, const char *image, const char *
   aot_cfg.corrupt=corrupt;
 }
 
+static u_int aot_interp_skew;
+
 static void aot_init_mode(void)
 {
   aot_mode=aot_cfg.mode;
+#ifdef RT_TRACE
+  aot_interp_skew=aot_mode==AOT_INTERP?aot_cfg.corrupt:0;
+  if(aot_interp_skew) fprintf(stderr,"new_dynarec AOT interp: charging %u cycles too many at every interpreted branch, on purpose\n",aot_interp_skew);
+#endif
 }
 
-// emit writes plain RW memory and load runs only the image: neither maps the MAP_JIT cache
+// emit writes plain RW memory and load and interp run only the image: neither maps the MAP_JIT cache
 static int aot_maps_no_cache(void)
 {
-  return aot_mode==AOT_EMIT||aot_mode==AOT_LOAD;
+  return aot_mode==AOT_EMIT||AOT_IMAGE_ONLY(aot_mode);
 }
 
 static u_int aot_flags_now(void)
@@ -175,10 +188,13 @@ static FILE *aot_log; static char *aot_log_path; // shape, hybrid: the compile l
 
 static void aot_report(const char *when)
 {
-  static const char *const name[]={"off","shape","hybrid","emit","load"};
+  static const char *const name[]={"off","shape","hybrid","emit","load","interp"};
   if(aot_mode==AOT_OFF) return;
   fprintf(stderr,"new_dynarec AOT (%s, %s): %lu compiled, %lu cache wraps, %lu installed, %lu missed, %lu passed over for their compile flags, %lu lookahead differs, %lu orphan stubs\n",
     name[aot_mode],when,aot_stats.compiled,aot_stats.wraps,aot_stats.installs,aot_stats.misses,aot_stats.flag_differs,aot_stats.lookahead,aot_stats.orphans);
+  if(aot_mode==AOT_INTERP)
+    fprintf(stderr,"new_dynarec AOT (interp, %s): %lu interpreter entries, %lu instructions interpreted, %lu distinct addresses missed\n",
+      when,aot_stats.interp_runs,aot_stats.interp_insns,aot_stats.interp_addrs);
   if(aot_log) fflush(aot_log);
   aot_vm_report(when);
 }
@@ -459,6 +475,9 @@ static void *aot_lib; // the image's dylib, while one is loaded
 static const u_char *aot_code;
 static struct aot_block *aot_blocks; static u_int aot_nblocks;
 
+static void aot_interp_missed(u_int addr);
+static void aot_interp_release(void);
+
 static int aot_block_cmp(const void *a, const void *b)
 {
   u_int x=((const struct aot_block *)a)->addr, y=((const struct aot_block *)b)->addr;
@@ -514,7 +533,7 @@ static void aot_init(void)
   if(aot_mode==AOT_SHAPE||aot_mode==AOT_HYBRID) aot_open_log(aot_cfg.log);
   if(aot_mode==AOT_EMIT) aot_emit_all();
 #endif
-  if(aot_mode==AOT_LOAD||aot_mode==AOT_HYBRID) { aot_load_image(aot_cfg.image); aot_vm_report("image loaded"); }
+  if(AOT_IMAGE_ONLY(aot_mode)||aot_mode==AOT_HYBRID) { aot_load_image(aot_cfg.image); aot_vm_report("image loaded"); }
 }
 
 /* new_dynarec_cleanup's: the run's report, then the image released, so the next init (a reset,
@@ -523,6 +542,7 @@ static void aot_cleanup(void)
 {
   aot_report("end of run");
   aot_release_image();
+  aot_interp_release();
   memset(&aot_stats,0,sizeof aot_stats);
 }
 
@@ -570,6 +590,11 @@ static int aot_install(int addr)
   }
   aot_stats.misses++;
   if(aot_mode==AOT_HYBRID) return -1; // the JIT compiles it
+  if(aot_mode==AOT_INTERP) {
+    AOT_CHECK(!(addr&1),"miss at the delay-slot entry %08x: interp cannot enter a delay slot",(u_int)addr);
+    aot_interp_missed((u_int)addr);
+    return AOT_INTERPRET;
+  }
   AOT_CHECK(0,"miss at %08x: the image holds %d block(s) starting there, none with its words (%08x %08x %08x %08x)",
     (u_int)addr,candidates,src[0],src[1],src[2],src[3]);
   return 1;
@@ -577,9 +602,211 @@ static int aot_install(int addr)
 
 static int aot_from_image(int addr, int *ret)
 {
-  if(aot_mode==AOT_LOAD) { *ret=aot_install(addr); return 1; }
+  if(AOT_IMAGE_ONLY(aot_mode)) { *ret=aot_install(addr); return 1; }
 #ifdef RT_TRACE
   if(aot_mode==AOT_HYBRID) { int r=aot_install(addr); if(r>=0) { *ret=r; return 1; } } // else the JIT compiles it
 #endif
   return 0;
+}
+
+/**** interp: a miss run on the interpreter, timed as the dynarec times it ****/
+/* The dynarec's timing model (do_cc, the stubs, cop0_assemble), which aot_interp_run reproduces:
+ * - Cycles accrue per instruction executed, count_per_op each, but reach the cycle count only at a
+ *   branch: after its delay slot, the count gains (k+2)*count_per_op, k the instructions run since
+ *   the last branch's delay slot (ccadj), and an interrupt is taken when the count is >= 0.
+ * - A taken branch to itself whose delay slot is a NOP is an idle loop: the count becomes
+ *   max(count,0) + 2*count_per_op and the interrupt is taken.
+ * - A helper sees the count as it would be at its instruction: memory accesses (the read and write
+ *   stubs) at k+1, MFC0, TLBWI, TLBWR and ERET at k, MTC0 at k (Status: k+1).
+ * - Falling through to the next block adds the count without a check, as does handing back here.
+ * Which instructions make up a block does not matter to this model, so the interpreter runs from
+ * the missed address until a branch resolves, then hands its target to get_addr_ht, which finds
+ * the image's block there or comes back here. */
+void aot_interp_entry(void);
+static u_int aot_interp_pc;   // where the latest miss left the interpreter to start
+
+static void *aot_interpret_entry(int r)
+{
+  return r==AOT_INTERPRET?(void*)aot_interp_entry:NULL;
+}
+
+// a distinct miss address is logged once (and to `log`, if one is set, for a later re-emit)
+static u_int *aot_interp_seen; static u_int aot_interp_seen_cap;
+static void aot_interp_missed(u_int addr)
+{
+  aot_interp_pc=addr;
+  if(aot_stats.interp_addrs*2>=aot_interp_seen_cap) {
+    u_int cap=aot_interp_seen_cap?aot_interp_seen_cap*2:1024, *t=(u_int*)calloc(cap,4), k;
+    AOT_CHECK(t,"out of memory");
+    for(k=0;k<aot_interp_seen_cap;k++) if(aot_interp_seen[k]) {
+      u_int h=(aot_interp_seen[k]*2654435761u)&(cap-1);
+      while(t[h]) h=(h+1)&(cap-1);
+      t[h]=aot_interp_seen[k];
+    }
+    free(aot_interp_seen); aot_interp_seen=t; aot_interp_seen_cap=cap;
+  }
+  u_int h=(addr*2654435761u)&(aot_interp_seen_cap-1);
+  while(aot_interp_seen[h]) { if(aot_interp_seen[h]==addr) return; h=(h+1)&(aot_interp_seen_cap-1); }
+  aot_interp_seen[h]=addr;
+  aot_stats.interp_addrs++;
+  fprintf(stderr,"new_dynarec AOT interp: miss at %08x, interpreted\n",addr);
+}
+
+static void aot_interp_release(void)
+{
+  free(aot_interp_seen); aot_interp_seen=NULL; aot_interp_seen_cap=0;
+}
+
+// the word at pc, or 0 (and *ok 0) where the page is unmapped
+static u_int aot_fetch(u_int pc, int *ok)
+{
+  u_int limit;
+  const u_int *src=block_source((int)pc,&limit);
+  *ok=src!=NULL;
+  return src?*src:0;
+}
+
+/* Run the non-branch instruction iw at pc, k instructions after the last branch, as the dynarec's
+ * helpers would see it. Returns nonzero when it raised an exception (pcaddr is then the handler). */
+static int aot_interp_one(u_int pc, u_int iw, int k, int ds)
+{
+  struct r4300_core *r4300=&g_dev.r4300;
+  struct new_dynarec_hot_state *st=&r4300->new_dynarec_hot_state;
+  const struct r4300_idec *idec=r4300_get_idec(iw);
+  int cpo=(int)CLOCK_DIVIDER;
+  aot_stats.interp_insns++;
+  switch(idec->opcode) {
+  case R4300_OP_MTC0: { // MTC0_new, as cop0_assemble calls it
+    u_int copr=(iw>>11)&0x1f;
+    st->fake_pc.f.r.rt=&st->rt;
+    st->rt=(int64_t)(int32_t)r4300_regs(r4300)[(iw>>16)&0x1f];
+    MTC0_new(copr,cpo*(k+(copr==CP0_STATUS_REG)),pc);
+    return (copr==CP0_COUNT_REG||copr==CP0_STATUS_REG)&&st->pending_exception;
+  }
+  case R4300_OP_TLBWI: TLBWI_new(pc,cpo*k); return 0;
+  case R4300_OP_TLBWR: TLBWR_new(pc,cpo*k); return 0;
+  default: break;
+  }
+  st->fake_pc.addr=pc;
+  r4300_decode(&st->fake_pc,r4300,idec,iw,0,NULL);
+  int count=cpo*(k+(idec->opcode!=R4300_OP_MFC0)); // MFC0_new's count, else a stub's
+  st->pcaddr=pc;
+  r4300->delay_slot=ds;
+  st->cycle_count+=count; // UPDATE_COUNT_IN
+  st->pending_exception=0;
+  st->fake_pc.ops();
+  if(!st->pending_exception) st->cycle_count-=count; // UPDATE_COUNT_OUT
+  r4300->delay_slot=0;
+  return st->pending_exception;
+}
+
+/* aot_interp_entry's (linkage_arm64.S): interpret from aot_interp_pc, the cycle count in the hot
+ * state, until a branch resolves; return the host address to continue at (the stop flag set means
+ * the dynarec stops instead). */
+void *aot_interp_run(void)
+{
+  struct r4300_core *r4300=&g_dev.r4300;
+  struct new_dynarec_hot_state *st=&r4300->new_dynarec_hot_state;
+  struct precomp_instr saved=st->fake_pc; // the dynarec's helpers expect its rs/rt/rd pointers
+  int64_t *regs=r4300_regs(r4300);
+  int cpo=(int)CLOCK_DIVIDER;
+  u_int pc=aot_interp_pc, next;
+  int k=0, ok;
+  aot_stats.interp_runs++;
+#define AOT_INTERP_LEAVE(to) do { st->fake_pc=saved; return get_addr_ht(to); } while(0)
+  for(;;) {
+    u_int iw=aot_fetch(pc,&ok);
+    if(!ok) { st->cycle_count+=cpo*k; AOT_INTERP_LEAVE(pc); } // get_addr_ht raises the TLB miss
+    const struct r4300_idec *idec=r4300_get_idec(iw);
+    int64_t rs=regs[(iw>>21)&0x1f], rt=regs[(iw>>16)&0x1f];
+    u_int target=pc+4+((u_int)(int32_t)(int16_t)iw<<2);
+    int branch=1, take=0, likely=0, reg_target=0;
+    int64_t *link=NULL;
+    switch(idec->opcode) {
+    case R4300_OP_J: take=1; target=((pc+4)&0xf0000000)|((iw&0x3ffffff)<<2); break;
+    case R4300_OP_JAL: take=1; target=((pc+4)&0xf0000000)|((iw&0x3ffffff)<<2); link=&regs[31]; break;
+    case R4300_OP_JR: take=1; target=(u_int)rs; reg_target=1; break;
+    case R4300_OP_JALR: take=1; target=(u_int)rs; reg_target=1; link=&regs[(iw>>11)&0x1f]; break;
+    case R4300_OP_BEQL: likely=1; /* fall through */
+    case R4300_OP_BEQ: take=rs==rt; break;
+    case R4300_OP_BNEL: likely=1; /* fall through */
+    case R4300_OP_BNE: take=rs!=rt; break;
+    case R4300_OP_BLEZL: likely=1; /* fall through */
+    case R4300_OP_BLEZ: take=rs<=0; break;
+    case R4300_OP_BGTZL: likely=1; /* fall through */
+    case R4300_OP_BGTZ: take=rs>0; break;
+    case R4300_OP_BLTZL: likely=1; /* fall through */
+    case R4300_OP_BLTZ: take=rs<0; break;
+    case R4300_OP_BGEZL: likely=1; /* fall through */
+    case R4300_OP_BGEZ: take=rs>=0; break;
+    case R4300_OP_BLTZALL: likely=1; /* fall through */
+    case R4300_OP_BLTZAL: take=rs<0; link=&regs[31]; break;
+    case R4300_OP_BGEZALL: likely=1; /* fall through */
+    case R4300_OP_BGEZAL: take=rs>=0; link=&regs[31]; break;
+    case R4300_OP_BC1FL: likely=1; /* fall through */
+    case R4300_OP_BC1F: take=!(*r4300_cp1_fcr31(&r4300->cp1)&FCR31_CMP_BIT); break;
+    case R4300_OP_BC1TL: likely=1; /* fall through */
+    case R4300_OP_BC1T: take=(*r4300_cp1_fcr31(&r4300->cp1)&FCR31_CMP_BIT)!=0; break;
+    case R4300_OP_ERET: // cop0_assemble: the count at k, then jump_eret
+      aot_stats.interp_insns++;
+      st->cycle_count+=cpo*k;
+      st->fake_pc=saved;
+      return ERET_new();
+    case R4300_OP_SYSCALL: // syscall_assemble: the count at k, then jump_syscall
+      aot_stats.interp_insns++;
+      st->cycle_count+=cpo*k;
+      st->pcaddr=pc;
+      st->fake_pc=saved;
+      return SYSCALL_new();
+    default: branch=0; break;
+    }
+    if(!branch) {
+      if(aot_interp_one(pc,iw,k,0)) AOT_INTERP_LEAVE(st->pcaddr);
+      pc+=4; k++;
+      continue;
+    }
+    aot_stats.interp_insns++;
+    if((idec->opcode==R4300_OP_BC1F||idec->opcode==R4300_OP_BC1T||idec->opcode==R4300_OP_BC1FL||idec->opcode==R4300_OP_BC1TL)
+       &&check_cop1_unusable(r4300)) { st->cycle_count+=cpo*k; AOT_INTERP_LEAVE(st->pcaddr); }
+    if(link) *link=(int64_t)(int32_t)(pc+8);
+    u_int ds=aot_fetch(pc+4,&ok);
+    AOT_CHECK(ok,"interp: the delay slot of %08x is unmapped",pc);
+    if(!likely||take) {
+      const struct r4300_idec *dsdec=r4300_get_idec(ds);
+      switch(dsdec->opcode) {
+      case R4300_OP_J: case R4300_OP_JAL: case R4300_OP_JR: case R4300_OP_JALR:
+      case R4300_OP_BEQ: case R4300_OP_BEQL: case R4300_OP_BNE: case R4300_OP_BNEL:
+      case R4300_OP_BLEZ: case R4300_OP_BLEZL: case R4300_OP_BGTZ: case R4300_OP_BGTZL:
+      case R4300_OP_BLTZ: case R4300_OP_BLTZL: case R4300_OP_BGEZ: case R4300_OP_BGEZL:
+      case R4300_OP_BLTZAL: case R4300_OP_BLTZALL: case R4300_OP_BGEZAL: case R4300_OP_BGEZALL:
+      case R4300_OP_BC1F: case R4300_OP_BC1FL: case R4300_OP_BC1T: case R4300_OP_BC1TL:
+      case R4300_OP_ERET: case R4300_OP_SYSCALL:
+        AOT_CHECK(0,"interp: %08x's delay slot holds a jump (%08x), which the dynarec times otherwise",pc,ds);
+      default: break;
+      }
+      if(aot_interp_one(pc+4,ds,k+1,1)) AOT_INTERP_LEAVE(st->pcaddr);
+    }
+    next=take?target:pc+8;
+    if(take&&!reg_target&&target==pc&&ds==0) { // do_cc's idle loop
+      if(st->cycle_count<0) st->cycle_count=0;
+      st->cycle_count+=cpo*2;
+    } else {
+      int count=k;
+      if(r4300->cp0.count_per_op_denom_pot) { // do_cc's rounding
+        count+=(1<<r4300->cp0.count_per_op_denom_pot)-1;
+        count>>=r4300->cp0.count_per_op_denom_pot;
+      }
+      st->cycle_count+=cpo*(count+2);
+    }
+    st->cycle_count+=(int)aot_interp_skew;
+    if(st->cycle_count>=0) { // cc_interrupt, from do_ccstub with pcaddr the branch's way
+      st->pcaddr=next;
+      st->pending_exception=0;
+      dynarec_gen_interrupt();
+      if(st->stop) { st->fake_pc=saved; return NULL; }
+      if(st->pending_exception) next=st->pcaddr;
+    }
+    AOT_INTERP_LEAVE(next);
+  }
+#undef AOT_INTERP_LEAVE
 }

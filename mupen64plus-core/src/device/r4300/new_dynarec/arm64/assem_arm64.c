@@ -4665,7 +4665,7 @@ static void arch_init(void) {
             "%d helpers do not fit aot_imports",(int)AOT_IMPORT_COUNT);
   memcpy(g_dev.r4300.new_dynarec_hot_state.aot_imports,jump_table_symbols,sizeof(jump_table_symbols));
   g_dev.r4300.new_dynarec_hot_state.aot_imports[AOT_IMPORT_COUNT-1]=(uintptr_t)verify_code_aot;
-  if(aot_mode==AOT_LOAD) return; // no code cache, so no trampolines
+  if(AOT_IMAGE_ONLY(aot_mode)) return; // no code cache, so no trampolines
 
   // Trampolines for jumps >128MB
   intptr_t *ptr,*ptr2,*ptr3;
