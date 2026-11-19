@@ -147,7 +147,9 @@ void run_r4300(struct r4300_core* r4300)
     {
         DebugMessage(M64MSG_INFO, "Starting R4300 emulator: Pure Interpreter");
         r4300->emumode = EMUMODE_PURE_INTERPRETER;
+        rt_trace_start();
         run_pure_interpreter(r4300);
+        rt_trace_stop();
     }
 #if defined(DYNAREC)
     else if (r4300->emumode >= 2)

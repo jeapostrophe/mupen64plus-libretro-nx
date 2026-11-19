@@ -20,6 +20,7 @@
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
 #include "pure_interp.h"
+#include "rt_trace.h"
 
 #include <stdint.h>
 
@@ -168,6 +169,7 @@ void InterpretOpcode(struct r4300_core* r4300)
 	if (op_address == NULL)
 		return;
 	uint32_t op = *op_address;
+	RT_TRACE_FETCH(*r4300_pc(r4300), op);
 
 	switch ((op >> 26) & 0x3F) {
 	case 0: /* SPECIAL prefix */
