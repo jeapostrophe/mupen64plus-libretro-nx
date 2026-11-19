@@ -957,8 +957,9 @@ static u_int genjmp(intptr_t addr)
     out_rx=((intptr_t)out-(intptr_t)base_addr)+(intptr_t)base_addr_rx;
 
   intptr_t offset=addr-out_rx;
-  /* AOT shape: a direct branch only ever stays inside the block (emit_call and emit_jmp take
-     the helpers through aot_imports), so it can never need the cache's trampoline table */
+  /* AOT shape: emit_call and emit_jmp take every helper through aot_imports, so a direct branch
+     targets only the block itself; this bounds it to a block's size and never reaches the cache's
+     trampoline table */
   AOT_CHECK(!aot_mode||(offset>=-(intptr_t)MAX_OUTPUT_BLOCK_SIZE&&offset<(intptr_t)MAX_OUTPUT_BLOCK_SIZE),
             "a branch out of an AOT-shaped block to %llx",(unsigned long long)addr);
   if(offset<-134217728LL||offset>=134217728LL)
@@ -2036,7 +2037,7 @@ static int aot_import_index(intptr_t a)
 static void emit_aot_import_branch(int n, u_int op)
 {
   intptr_t offset=fp_aot_imports+n*sizeof(uintptr_t);
-  AOT_CHECK(offset<32760&&(offset&7)==0,"aot_imports[%d] is out of ldr's reach",n);
+  AOT_CHECK(offset<=32760&&(offset&7)==0,"aot_imports[%d] is out of ldr's reach",n);
   assem_debug("ldr x16,fp+%d; %s x16",offset,op==0xd63f0000?"blr":"br");
   output_w32(0xf9400000|((offset>>3)<<10)|(FP<<5)|TRAMPOLINE_REG);
   output_w32(op|(TRAMPOLINE_REG<<5));
@@ -3167,14 +3168,8 @@ static void emit_aot_dirty_stub_call(struct ll_entry *head)
 static intptr_t do_dirty_stub(int i, struct ll_entry * head)
 {
   assem_debug("do_dirty_stub %x",head->vaddr);
-  if(aot_mode) {
-    emit_aot_dirty_stub_call(head);
-    intptr_t entry=(intptr_t)out;
-    load_regs_entry(i);
-    if(entry==(intptr_t)out) entry=instr_addr[i];
-    emit_jmp(instr_addr[i]);
-    return entry;
-  }
+  if(aot_mode) emit_aot_dirty_stub_call(head);
+  else {
   intptr_t out_rx=((intptr_t)out-(intptr_t)base_addr)+(intptr_t)base_addr_rx;
   intptr_t offset=(((intptr_t)head&~0xfffLL)-((intptr_t)out_rx&~0xfffLL));
 
@@ -3189,6 +3184,7 @@ static intptr_t do_dirty_stub(int i, struct ll_entry * head)
   }
 
   emit_call((intptr_t)verify_code);
+  }
 
   intptr_t entry=(intptr_t)out;
   load_regs_entry(i);
