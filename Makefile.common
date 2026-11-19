@@ -71,6 +71,7 @@ SOURCES_C = \
 	$(CORE_DIR)/src/device/pif/n64_cic_nus_6105.c \
 	$(CORE_DIR)/src/device/pif/pif.c \
 	$(CORE_DIR)/src/device/r4300/cached_interp.c \
+	$(CORE_DIR)/src/device/r4300/rt_trace.c \
 	$(CORE_DIR)/src/device/r4300/cp0.c \
 	$(CORE_DIR)/src/device/r4300/cp1.c \
 	$(CORE_DIR)/src/device/r4300/cp2.c \

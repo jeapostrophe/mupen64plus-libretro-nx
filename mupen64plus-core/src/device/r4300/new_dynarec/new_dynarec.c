@@ -8853,6 +8853,34 @@ void new_dynarec_cleanup(void)
 #endif
 }
 
+/* retro-trainer's dynarec compile log (its PLAN-handheld HH-33), in an RT_TRACE build only (the
+ * macOS build; rt_trace.h): when M64P_BLOCK_LOG names a file, every block this dynarec compiles
+ * appends "<start vaddr> <word count> <fnv1a64 of the guest words> <each guest word>" to it, the
+ * extent and key of the dynarec's own block. It is not an `rt-trace` (the dynarec does not
+ * reproduce a recording, and this counts compiles, not executions). */
+#ifdef RT_TRACE
+static void block_log_compiled(u_int vaddr, int words, const u_int *guest)
+{
+  static FILE *log;
+  static int opened;
+  if (!opened) {
+    const char *path = getenv("M64P_BLOCK_LOG");
+    opened = 1;
+    if (path && *path) log = fopen(path, "w");
+  }
+  if (!log) return;
+  uint64_t h = 1469598103934665603ULL;
+  const unsigned char *b = (const unsigned char *)guest;
+  for (int k = 0; k < words * 4; k++) { h ^= b[k]; h *= 1099511628211ULL; }
+  fprintf(log, "%08x %d %016llx", vaddr, words, (unsigned long long)h);
+  for (int k = 0; k < words; k++) fprintf(log, " %08x", guest[k]);
+  fputc('\n', log);
+  fflush(log);
+}
+#else
+#define block_log_compiled(vaddr, words, guest) ((void)0)
+#endif
+
 static int new_recompile_block_impl(int addr)
 {
 #if defined(RECOMPILER_DEBUG) && !defined(RECOMP_DBG)
@@ -11981,6 +12009,7 @@ static int new_recompile_block_impl(int addr)
     }
     expirep=(expirep+1)&65535;
   }
+  block_log_compiled(start, slen, source);
   return 0;
 }
 

@@ -20,6 +20,7 @@
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
 #include "cached_interp.h"
+#include "rt_trace.h"
 
 #include <assert.h>
 #include <stdint.h>
@@ -83,6 +84,7 @@ void cached_interp_##name(void) \
         (*r4300_pc_struct(r4300))++; \
         r4300->delay_slot=1; \
         UPDATE_DEBUGGER(); \
+        RT_TRACE_HIT((*r4300_pc_struct(r4300))->addr); \
         (*r4300_pc_struct(r4300))->ops(); \
         cp0_update_count(r4300); \
         r4300->delay_slot=0; \
@@ -116,6 +118,7 @@ void cached_interp_##name##_OUT(void) \
         (*r4300_pc_struct(r4300))++; \
         r4300->delay_slot=1; \
         UPDATE_DEBUGGER(); \
+        RT_TRACE_HIT((*r4300_pc_struct(r4300))->addr); \
         (*r4300_pc_struct(r4300))->ops(); \
         cp0_update_count(r4300); \
         r4300->delay_slot=0; \
@@ -250,6 +253,7 @@ void cached_interp_NOTCOMPILED(void)
 The preceeding update_debugger SHOULD be unnecessary since it should have been
 called before NOTCOMPILED would have been executed
 */
+    RT_TRACE_HIT((*r4300_pc_struct(r4300))->addr);
     (*r4300_pc_struct(r4300))->ops();
 }
 
@@ -783,6 +787,7 @@ void cached_interp_init_block(struct r4300_core* r4300, uint32_t address)
     }
 
     /* reset block instructions (addr + ops) */
+    rt_trace_reset_page(b->start);
     for (i = 0; i < length; ++i)
     {
         b->block[i].addr = b->start + 4*i;
@@ -860,6 +865,7 @@ void cached_interp_recompile_block(struct r4300_core* r4300, const uint32_t* iw,
 
         /* decode instruction */
         opcode = r4300_decode(inst, r4300, r4300_get_idec(iw[i]), iw[i], iw[i+1], block);
+        rt_trace_decoded(inst->addr, iw[i]);
 
         /* decode ending conditions */
         if (i >= length2) { finished = 2; }
@@ -996,6 +1002,7 @@ void run_cached_interpreter(struct r4300_core* r4300)
 #ifdef DBG
         if (g_DebuggerActive) update_debugger((*r4300_pc_struct(r4300))->addr);
 #endif
+        RT_TRACE_HIT((*r4300_pc_struct(r4300))->addr);
         (*r4300_pc_struct(r4300))->ops();
     }
 }

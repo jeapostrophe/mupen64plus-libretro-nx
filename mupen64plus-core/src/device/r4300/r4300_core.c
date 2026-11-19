@@ -40,6 +40,8 @@
 #include <string.h>
 #include <time.h>
 
+#include "rt_trace.h"
+
 void init_r4300(struct r4300_core* r4300, struct memory* mem, struct mi_controller* mi, struct rdram* rdram, const struct interrupt_handler* interrupt_handlers,
     unsigned int emumode, unsigned int count_per_op, unsigned int count_per_op_denom_pot, int no_compiled_jump, int randomize_interrupt, uint32_t start_address)
 {
@@ -187,6 +189,7 @@ void run_r4300(struct r4300_core* r4300)
         r4300->cached_interp.recompile_block = cached_interp_recompile_block;
 
         init_blocks(&r4300->cached_interp);
+        rt_trace_start();
         cached_interpreter_jump_to(r4300, r4300->start_address);
 
         /* Prevent segfault on failed cached_interpreter_jump_to */
@@ -198,6 +201,7 @@ void run_r4300(struct r4300_core* r4300)
 
         run_cached_interpreter(r4300);
 
+        rt_trace_stop();
         free_blocks(&r4300->cached_interp);
     }
 

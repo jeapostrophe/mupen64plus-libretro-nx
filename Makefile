@@ -405,6 +405,9 @@ else ifneq (,$(findstring osx,$(platform)))
    LDFLAGS += -stdlib=libc++
 
    PLATCFLAGS += -D__MACOSX__ -DOSX -DOS_MAC_OS_X -DHAVE_UNISTD_H=1 -DHAVE_POSIX_MEMALIGN -DGL_SILENCE_DEPRECATION=1
+   # retro-trainer's instruction trace (mupen64plus-core/src/device/r4300/rt_trace.h): its
+   # Mac tools trace replays here; no other build carries the hooks.
+   COREFLAGS += -DRT_TRACE
    GL_LIB := -framework OpenGL
    LDFLAGS += -framework AudioToolbox
 
