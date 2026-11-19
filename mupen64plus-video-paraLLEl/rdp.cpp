@@ -122,6 +122,12 @@ void process_commands()
 	cmd_ptr = 0;
 	cmd_cur = 0;
 	*GET_GFX_INFO(DPC_START_REG) = *GET_GFX_INFO(DPC_CURRENT_REG) = *GET_GFX_INFO(DPC_END_REG);
+	// LANE-ONLY DIAGNOSTIC (retro-trainer lane hh33b): M64P_RDP_SERIAL waits for the GPU at the
+	// end of every command batch, so its writes to RDRAM land before the CPU runs on
+	static int serial = -1;
+	if (serial < 0) serial = getenv("M64P_RDP_SERIAL") != nullptr;
+	if (serial && frontend)
+		frontend->wait_for_timeline(frontend->signal_timeline());
 }
 
 static QueryPoolHandle refresh_begin_ts;
