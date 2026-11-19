@@ -8981,11 +8981,57 @@ static u_int *block_source(int addr, u_int *plimit)
   exit(1);
 }
 
+/* AOT: a compile reads entries of these arrays it did not write this time (past the block's
+ * end), so without this its code would depend on the block compiled before it (measured: 6 of
+ * snp1's 1623 blocks re-emitted differently from the JIT's before it). */
+static void aot_clear_compiler_state(void)
+{
+  memset(insn,0,sizeof insn);
+  memset(itype,0,sizeof itype);
+  memset(opcode,0,sizeof opcode);
+  memset(opcode2,0,sizeof opcode2);
+  memset(bt,0,sizeof bt);
+  memset(rs1,0,sizeof rs1);
+  memset(rs2,0,sizeof rs2);
+  memset(rt1,0,sizeof rt1);
+  memset(rt2,0,sizeof rt2);
+  memset(us1,0,sizeof us1);
+  memset(us2,0,sizeof us2);
+  memset(dep1,0,sizeof dep1);
+  memset(dep2,0,sizeof dep2);
+  memset(lt1,0,sizeof lt1);
+  memset(imm,0,sizeof imm);
+  memset(ba,0,sizeof ba);
+  memset(likely,0,sizeof likely);
+  memset(is_ds,0,sizeof is_ds);
+  memset(ooo,0,sizeof ooo);
+  memset(unneeded_reg,0,sizeof unneeded_reg);
+  memset(unneeded_reg_upper,0,sizeof unneeded_reg_upper);
+  memset(branch_unneeded_reg,0,sizeof branch_unneeded_reg);
+  memset(branch_unneeded_reg_upper,0,sizeof branch_unneeded_reg_upper);
+  memset(p32,0,sizeof p32);
+  memset(pr32,0,sizeof pr32);
+  memset(regmap_pre,0,sizeof regmap_pre);
+  memset(constmap,0,sizeof constmap);
+  memset(regs,0,sizeof regs);
+  memset(branch_regs,0,sizeof branch_regs);
+  memset(minimum_free_regs,0,sizeof minimum_free_regs);
+  memset(needed_reg,0,sizeof needed_reg);
+  memset(requires_32bit,0,sizeof requires_32bit);
+  memset(wont_dirty,0,sizeof wont_dirty);
+  memset(will_dirty,0,sizeof will_dirty);
+  memset(ccadj,0,sizeof ccadj);
+  memset(instr_addr,0,sizeof instr_addr);
+  memset(link_addr,0,sizeof link_addr);
+  memset(stubs,0,sizeof stubs);
+}
+
 static int new_recompile_block_impl(int addr)
 {
 #if defined(RECOMPILER_DEBUG) && !defined(RECOMP_DBG)
   recomp_dbg_block(addr);
 #endif
+  if(aot_mode) aot_clear_compiler_state();
 
   assem_debug("NOTCOMPILED: addr = %x -> %x", (int)addr, (intptr_t)out);
 #if COUNT_NOTCOMPILEDS
