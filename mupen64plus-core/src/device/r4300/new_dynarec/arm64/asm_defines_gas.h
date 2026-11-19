@@ -1,5 +1,5 @@
 #define offsetof_struct_device_r4300 (0x00000000)
-#define offsetof_struct_r4300_core_cp0 (0x031017e8)
+#define offsetof_struct_r4300_core_cp0 (0x03101fe8)
 #define offsetof_struct_cp0_last_addr (0x000002a8)
 #define offsetof_struct_cp0_count_per_op (0x000002ac)
 #define offsetof_struct_cp0_tlb (0x000002b4)
@@ -32,4 +32,4 @@
 #define offsetof_struct_new_dynarec_hot_state_rt (0x000005c8)
 #define offsetof_struct_new_dynarec_hot_state_rd (0x000005d0)
 #define offsetof_struct_new_dynarec_hot_state_mini_ht (0x000005e0)
-#define offsetof_struct_new_dynarec_hot_state_memory_map (0x000007e0)
+#define offsetof_struct_new_dynarec_hot_state_memory_map (0x00000fe0)
