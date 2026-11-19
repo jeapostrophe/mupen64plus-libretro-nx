@@ -77,6 +77,7 @@ static void aot_note_entry(u_int vaddr, u_int reg32, void *dirty, void *clean, i
 static void aot_block_compiled(int addr, uintptr_t beginning);
 static int aot_mode_from_env(void);
 static void aot_init(void);
+static void aot_report(const char *when);
 static u_int *aot_emit_source;   // emit: the words of the block being re-emitted
 static u_char *aot_block_end;    // the end of the block just compiled, before `out` wraps
 
@@ -8880,6 +8881,7 @@ void new_dynarec_cleanup(void)
   recomp_dbg_cleanup();
 #endif
 
+  aot_report("end of run"); // before the cache is unmapped, so its region is still counted
   int n;
   for(n=0;n<4096;n++) ll_clear(jump_in+n);
   for(n=0;n<4096;n++) ll_clear(jump_out+n);
@@ -12332,11 +12334,15 @@ static void aot_vm_report(const char *when)
     count=VM_REGION_BASIC_INFO_COUNT_64;
     if(mach_vm_region(mach_task_self(),&a,&size,VM_REGION_BASIC_INFO_64,(vm_region_info_t)&info,&count,&object)!=KERN_SUCCESS) break;
     if(info.protection&VM_PROT_EXECUTE) {
-      char path[PROC_PIDPATHINFO_MAXSIZE];
-      int file=proc_regionfilename(getpid(),a,path,sizeof path)>0;
+      // proc_regionfilename names the next file-backed region for an anonymous one, so ask for
+      // the region's own record and check that it is this region's
+      struct proc_regionwithpathinfo rp;
+      int got=proc_pidinfo(getpid(),PROC_PIDREGIONPATHINFO,a,&rp,sizeof rp);
+      int file=got==(int)sizeof rp&&rp.prp_prinfo.pri_address==a&&rp.prp_vip.vip_path[0];
+      const char *path=rp.prp_vip.vip_path;
       x++;
       if(info.protection&VM_PROT_WRITE) { rwx++; fprintf(stderr,"new_dynarec AOT vm: rwx %llx+%llx %s\n",(unsigned long long)a,(unsigned long long)size,file?path:"(no file)"); }
-      if(!file) { anon++; fprintf(stderr,"new_dynarec AOT vm: executable, no file: %llx+%llx prot %x\n",(unsigned long long)a,(unsigned long long)size,info.protection); }
+      if(!file&&anon++<3) { fprintf(stderr,"new_dynarec AOT vm: executable, no file: %llx+%llx prot %x\n",(unsigned long long)a,(unsigned long long)size,info.protection); }
     }
     a+=size;
   }
@@ -12346,13 +12352,15 @@ static void aot_vm_report(const char *when)
 #endif
 }
 
-static void aot_atexit(void)
+static void aot_report(const char *when)
 {
+  if(aot_mode==AOT_OFF) return;
+  fprintf(stderr,"new_dynarec AOT, %s: ",when);
   fprintf(stderr,"new_dynarec AOT (%s): %lu compiled, %lu cache wraps, %lu installed, %lu lookahead differs, %lu orphan stubs\n",
     aot_mode==AOT_SHAPE?"shape":aot_mode==AOT_LOAD?"load":"emit",
     aot_stats.compiled,aot_stats.wraps,aot_stats.installs,aot_stats.lookahead,aot_stats.orphans);
   if(aot_log) fflush(aot_log);
-  aot_vm_report("exit");
+  aot_vm_report(when);
 }
 
 static void aot_load_image(void)
@@ -12394,15 +12402,13 @@ static void aot_load_image(void)
 
 static void aot_init(void)
 {
-  static int registered;
   if(aot_mode==AOT_OFF) return;
-  if(!registered) { registered=1; atexit(aot_atexit); }
   if(aot_mode==AOT_SHAPE) {
     const char *path=getenv("M64P_AOT_LOG");
     if(path&&*path&&!aot_log) { aot_log=fopen(path,"w"); AOT_CHECK(aot_log,"cannot write %s",path); }
   }
   if(aot_mode==AOT_EMIT) aot_emit_all();
-  if(aot_mode==AOT_LOAD) { aot_load_image(); aot_vm_report("load"); }
+  if(aot_mode==AOT_LOAD) { aot_load_image(); aot_vm_report("image loaded"); }
 }
 
 /* load: where the JIT would compile the block at `addr`, install the image's block that starts
