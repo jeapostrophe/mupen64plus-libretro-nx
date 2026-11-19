@@ -41,6 +41,9 @@
 #include "api/m64p_frontend.h"
 #include "api/m64p_types.h"
 #include "device/r4300/r4300_core.h"
+#ifdef NEW_DYNAREC
+#include "device/r4300/new_dynarec/new_dynarec.h"
+#endif
 #include "device/memory/memory.h"
 #include "main/main.h"
 #include "api/callbacks.h"
@@ -1947,6 +1950,16 @@ bool retro_load_game(const struct retro_game_info *game)
     format_saved_memory();
 
     update_variables(true);
+
+#ifdef NEW_DYNAREC
+    {
+       /* retro-trainer PLAN-handheld HH-33: the dynarec's AOT form (new_dynarec_aot_configure),
+          read from the environment here and nowhere else, for every game this process loads */
+       const char *corrupt = getenv("M64P_AOT_CORRUPT");
+       new_dynarec_aot_configure(getenv("M64P_AOT"), getenv("M64P_AOT_IMAGE"), getenv("M64P_AOT_LOG"),
+          corrupt ? (unsigned int)strtoul(corrupt, NULL, 16) : 0);
+    }
+#endif
 
     if(current_rdp_type == RDP_PLUGIN_GLIDEN64 && EnableThreadedRenderer)
     {

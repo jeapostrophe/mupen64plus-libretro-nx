@@ -958,8 +958,9 @@ static u_int genjmp(intptr_t addr)
 
   intptr_t offset=addr-out_rx;
   /* AOT shape: emit_call and emit_jmp take every helper through aot_imports, so a direct branch
-     targets only the block itself; this bounds it to a block's size and never reaches the cache's
-     trampoline table */
+     should target only the block being assembled. This catches one that lands
+     MAX_OUTPUT_BLOCK_SIZE or more from `out` (a helper, the trampoline table), not one into a
+     neighbouring block; emit's comparison of every block against the JIT's is the full check */
   AOT_CHECK(!aot_mode||(offset>=-(intptr_t)MAX_OUTPUT_BLOCK_SIZE&&offset<(intptr_t)MAX_OUTPUT_BLOCK_SIZE),
             "a branch out of an AOT-shaped block to %llx",(unsigned long long)addr);
   if(offset<-134217728LL||offset>=134217728LL)

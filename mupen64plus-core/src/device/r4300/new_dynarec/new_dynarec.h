@@ -98,5 +98,12 @@ void invalidate_cached_code_new_dynarec(struct r4300_core* r4300, uint32_t addre
 void new_dynarec_init(void);
 void new_dyna_start(void);
 void new_dynarec_cleanup(void);
+/* retro-trainer PLAN-handheld HH-33: the arm64 dynarec's AOT form (arm64/aot_arm64.c), from the
+ * next new_dynarec_init on. mode: NULL or "" for the stock dynarec, or "load"; an RT_TRACE build
+ * also has "shape", "emit" and "hybrid". image: the image dylib a load or hybrid run reads, or the
+ * path an emit writes its .code and .meta beside. log: the compile log a shape or hybrid run
+ * writes, or the one an emit reads. corrupt: an emit's block to corrupt on purpose, or 0. A no-op
+ * on the other dynarecs. */
+void new_dynarec_aot_configure(const char *mode, const char *image, const char *log, unsigned int corrupt);
 
 #endif /* M64P_DEVICE_R4300_NEW_DYNAREC_H */
