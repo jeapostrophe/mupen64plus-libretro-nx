@@ -80,6 +80,9 @@ struct new_dynarec_hot_state
     int64_t rd;
     intptr_t ram_offset;
     uintptr_t mini_ht[32][2];
+    /* retro-trainer PLAN-handheld HH-33: the helpers an AOT-shaped block calls, by index
+       (assem_arm64.c, aot_import_index), loaded off FP so the block holds no host address */
+    uintptr_t aot_imports[256];
     uintptr_t memory_map[1048576];
 #else
     char dummy;

@@ -53,6 +53,33 @@
 #endif // HAVE_LIBNX
 #endif
 
+/* retro-trainer PLAN-handheld HH-23/HH-33: the dynarec's AOT form. M64P_AOT chooses it
+ * (new_dynarec_init; unset is the stock dynarec):
+ * - "shape": the JIT, emitting AOT-shaped code: no block linking, no check_addr stop to a
+ *   block's extent, helpers called through the hot state's aot_imports by index, dirty stubs
+ *   that name themselves PC-relatively. Such a block holds no host address, so its bytes run
+ *   anywhere. M64P_AOT_LOG names the file each compiled block is logged to (aot_log_block).
+ * - "emit": re-emits the blocks of M64P_AOT_BLOCKS (a shape run's log) into an image
+ *   (M64P_AOT_OUT.code, .meta) in plain RW memory, never executed, then exits the process.
+ * - "load": runs from the image dylib M64P_AOT_IMAGE: no code cache is mapped, and a block is
+ *   installed from the image where the JIT would compile it (aot_install).
+ * The image format and its checks are aot_image_header's. */
+#define AOT_OFF 0
+#define AOT_SHAPE 1
+#define AOT_EMIT 2
+#define AOT_LOAD 3
+static int aot_mode;
+#define AOT_CHECK(cond, ...) do { if(!(cond)) { fprintf(stderr, "new_dynarec AOT: " __VA_ARGS__); \
+  fputc('\n', stderr); abort(); } } while (0)
+static int aot_install(int addr);
+static int aot_expiring(void *addr);
+static void aot_note_entry(u_int vaddr, u_int reg32, void *dirty, void *clean, int ht_replace);
+static void aot_block_compiled(int addr, uintptr_t beginning);
+static int aot_mode_from_env(void);
+static void aot_init(void);
+static u_int *aot_emit_source;   // emit: the words of the block being re-emitted
+static u_char *aot_block_end;    // the end of the block just compiled, before `out` wraps
+
 #if defined(__APPLE__) && defined(__aarch64__)
 /* Apple Silicon enforces W^X: the MAP_JIT code cache is executable by
  * default and only writable while the calling thread has toggled itself
@@ -64,11 +91,13 @@
 static int jit_write_depth;
 static void jit_write_begin(void)
 {
+  if (aot_mode >= AOT_EMIT) return; // no MAP_JIT mapping: emit writes RW memory, load none
   if (jit_write_depth++ == 0)
     pthread_jit_write_protect_np(0);
 }
 static void jit_write_end(void)
 {
+  if (aot_mode >= AOT_EMIT) return;
   if (--jit_write_depth == 0)
     pthread_jit_write_protect_np(1);
 }
@@ -2550,7 +2579,7 @@ static struct ll_entry *get_dirty(struct r4300_core* r4300,u_int vaddr,u_int fla
   while(head!=NULL) {
     if(head->vaddr==vaddr&&(head->reg32&flags)==0) {
       // Don't restore blocks which are about to expire from the cache
-      if((((uintptr_t)head->addr-(uintptr_t)out)<<(32-TARGET_SIZE_2))>0x60000000+(MAX_OUTPUT_BLOCK_SIZE<<(32-TARGET_SIZE_2))) {
+      if(!aot_expiring(head->addr)) {
         if(verify_dirty(head)==0) {
           r4300->cached_interp.invalid_code[vaddr>>12]=0;
           r4300->new_dynarec_hot_state.memory_map[vaddr>>12]|=WRITE_PROTECT;
@@ -2578,7 +2607,7 @@ static void *dynamic_linker_impl(void * src, u_int vaddr)
   struct ll_entry *head;
 
 #ifndef DISABLE_BLOCK_LINKING
-  head=get_clean(r4300,vaddr,~0);
+  head=aot_mode?NULL:get_clean(r4300,vaddr,~0);
   if(head!=NULL){
     void* src_rw=(void*)(((intptr_t)src-(intptr_t)base_addr_rx)+(intptr_t)base_addr);
 #if NEW_DYNAREC == NEW_DYNAREC_ARM64
@@ -2598,14 +2627,17 @@ static void *dynamic_linker_impl(void * src, u_int vaddr)
   if(ht_bin[0]&&ht_bin[0]->vaddr==vaddr) return (void *)(((intptr_t)ht_bin[0]->addr-(intptr_t)base_addr)+(intptr_t)base_addr_rx);
   if(ht_bin[1]&&ht_bin[1]->vaddr==vaddr) return (void *)(((intptr_t)ht_bin[1]->addr-(intptr_t)base_addr)+(intptr_t)base_addr_rx);
 
-#ifdef DISABLE_BLOCK_LINKING
+#ifndef DISABLE_BLOCK_LINKING
+  if(aot_mode)
+#endif
+  {
   head=get_clean(r4300,vaddr,~0);
   if(head!=NULL){
     ht_bin[1]=ht_bin[0];
     ht_bin[0]=head;
     return (void*)(((intptr_t)head->addr-(intptr_t)base_addr)+(intptr_t)base_addr_rx);
   }
-#endif
+  }
 
   head=get_dirty(r4300,vaddr,~0);
   if(head!=NULL){
@@ -2644,7 +2676,7 @@ static void *dynamic_linker_ds_impl(void * src, u_int vaddr)
   struct ll_entry *head;
 
 #ifndef DISABLE_BLOCK_LINKING
-  head=get_clean(r4300,vaddr,~0);
+  head=aot_mode?NULL:get_clean(r4300,vaddr,~0);
   if(head!=NULL){
     void* src_rw=(void*)(((intptr_t)src-(intptr_t)base_addr_rx)+(intptr_t)base_addr);
 #if NEW_DYNAREC == NEW_DYNAREC_ARM64
@@ -2664,14 +2696,17 @@ static void *dynamic_linker_ds_impl(void * src, u_int vaddr)
   if(ht_bin[0]&&ht_bin[0]->vaddr==vaddr) return (void *)(((intptr_t)ht_bin[0]->addr-(intptr_t)base_addr)+(intptr_t)base_addr_rx);
   if(ht_bin[1]&&ht_bin[1]->vaddr==vaddr) return (void *)(((intptr_t)ht_bin[1]->addr-(intptr_t)base_addr)+(intptr_t)base_addr_rx);
 
-#ifdef DISABLE_BLOCK_LINKING
+#ifndef DISABLE_BLOCK_LINKING
+  if(aot_mode)
+#endif
+  {
   head=get_clean(r4300,vaddr,~0);
   if(head!=NULL){
     ht_bin[1]=ht_bin[0];
     ht_bin[0]=head;
     return (void*)(((intptr_t)head->addr-(intptr_t)base_addr)+(intptr_t)base_addr_rx);
   }
-#endif
+  }
 
   head=get_dirty(r4300,vaddr,~0);
   if(head!=NULL){
@@ -2965,7 +3000,7 @@ static void invalidate_all_pages(void)
     }
   }
   #if NEW_DYNAREC >= NEW_DYNAREC_ARM
-  cache_flush((char *)base_addr_rx,(char *)base_addr_rx+(1<<TARGET_SIZE_2));
+  if(base_addr_rx) cache_flush((char *)base_addr_rx,(char *)base_addr_rx+(1<<TARGET_SIZE_2));
   #endif
   jit_write_end();
   #ifdef USE_MINI_HT
@@ -3019,7 +3054,7 @@ void clean_blocks(u_int page)
   while(head!=NULL) {
     if(!g_dev.r4300.cached_interp.invalid_code[head->vaddr>>12]) {
       // Don't restore blocks which are about to expire from the cache
-      if((((uintptr_t)head->addr-(uintptr_t)out)<<(32-TARGET_SIZE_2))>0x60000000+(MAX_OUTPUT_BLOCK_SIZE<<(32-TARGET_SIZE_2))) {
+      if(!aot_expiring(head->addr)) {
         if(verify_dirty(head)==0) {
           //DebugMessage(M64MSG_VERBOSE, "Possibly Restore %x (%x)",head->vaddr, (intptr_t)head->addr);
           u_int i,j;
@@ -3048,7 +3083,7 @@ void clean_blocks(u_int page)
             inv=1;
           }
           if(!inv) {
-            if((((uintptr_t)head->clean_addr-(uintptr_t)out)<<(32-TARGET_SIZE_2))>0x60000000+(MAX_OUTPUT_BLOCK_SIZE<<(32-TARGET_SIZE_2))) {
+            if(!aot_expiring(head->clean_addr)) {
               u_int ppage=page;
               if(page<2048&&g_dev.r4300.cp0.tlb.LUT_r[head->vaddr>>12]) ppage=(g_dev.r4300.cp0.tlb.LUT_r[head->vaddr>>12]^0x80000000)>>12;
               inv_debug("INV: Restored %x (%x/%x)\n",head->vaddr, (intptr_t)head->addr, (intptr_t)head->clean_addr);
@@ -8539,7 +8574,7 @@ static void pagespan_assemble(int i,struct regstat *i_regs)
   emit_jmp(0);
   int target_addr=start+i*4+5;
   void *stub=out;
-  void *compiled_target_addr=check_addr(target_addr);
+  void *compiled_target_addr=aot_mode?NULL:check_addr(target_addr);
   emit_extjump_ds((intptr_t)branch_addr,target_addr);
 #ifndef DISABLE_BLOCK_LINKING
   if(compiled_target_addr) {
@@ -8566,7 +8601,7 @@ static void pagespan_assemble(int i,struct regstat *i_regs)
     emit_jmp(0);
     int target_addr=start+i*4+8;
     void *stub=out;
-    void *compiled_target_addr=check_addr(target_addr);
+    void *compiled_target_addr=aot_mode?NULL:check_addr(target_addr);
     emit_extjump_ds((intptr_t)branch_addr,target_addr);
 #ifndef DISABLE_BLOCK_LINKING
     if(compiled_target_addr) {
@@ -8595,6 +8630,7 @@ static void pagespan_ds(void)
   do_dirty_stub_ds(head);
   head->clean_addr=(void *)out;
   (void)ll_add(jump_in+page,vaddr,(void *)out,(void *)out,start,copy,slen*4);
+  aot_note_entry(vaddr,0,head->addr,head->clean_addr,0);
   assert(regs[0].regmap_entry[HOST_CCREG]==CCREG);
   emit_addimm(HOST_CCREG,CLOCK_DIVIDER,HOST_CCREG);
   if(regs[0].regmap[HOST_CCREG]!=CCREG)
@@ -8695,6 +8731,7 @@ ALIGN(4096, char jit_memory[33554432]) __attribute__((section(".text")));
 void new_dynarec_init(void)
 {
   DebugMessage(M64MSG_INFO, "Init new dynarec");
+  aot_mode=aot_mode_from_env();
 
 #if defined(RECOMPILER_DEBUG) && !defined(RECOMP_DBG)
   recomp_dbg_init();
@@ -8756,6 +8793,13 @@ void new_dynarec_init(void)
   base_addr = g_dev.r4300.extra_memory;
   base_addr_rx = base_addr;
 #else /*DYNAMIC_CACHE_ADDR*/
+  if(aot_mode==AOT_LOAD) {
+    base_addr = base_addr_rx = NULL; // nothing is compiled: blocks come from the image
+  } else if(aot_mode==AOT_EMIT) {
+    // the re-emitted blocks are only ever written and copied out, never run: plain RW memory
+    base_addr = mmap (NULL, 1<<TARGET_SIZE_2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    base_addr_rx = base_addr;
+  } else {
   base_addr = mmap (NULL, 1<<TARGET_SIZE_2,
                     PROT_READ | PROT_WRITE | PROT_EXEC,
                     MAP_PRIVATE | MAP_ANONYMOUS
@@ -8765,6 +8809,7 @@ void new_dynarec_init(void)
                     ,
                     -1, 0);
   base_addr_rx = base_addr;
+  }
 #endif
 #elif NEW_DYNAREC == NEW_DYNAREC_ARM
   mprotect ((u_char *)g_dev.r4300.extra_memory, 1<<TARGET_SIZE_2,
@@ -8826,6 +8871,7 @@ void new_dynarec_init(void)
 
   tlb_speed_hacks();
   arch_init();
+  aot_init();
 }
 
 void new_dynarec_cleanup(void)
@@ -8843,7 +8889,7 @@ void new_dynarec_cleanup(void)
   #if defined(WIN32)
     VirtualFree(base_addr, 0, MEM_RELEASE);
   #elif NEW_DYNAREC == NEW_DYNAREC_ARM64 && CACHE_ADDR!=FIXED_CACHE_ADDR
-    if (munmap (base_addr_rx, 1<<TARGET_SIZE_2) < 0) {DebugMessage(M64MSG_ERROR, "munmap() failed");}
+    if (base_addr_rx && munmap (base_addr_rx, 1<<TARGET_SIZE_2) < 0) {DebugMessage(M64MSG_ERROR, "munmap() failed");}
   #else
     mprotect(base_addr, 1<<TARGET_SIZE_2, PROT_READ | PROT_WRITE);
   #endif
@@ -8934,6 +8980,8 @@ static int new_recompile_block_impl(int addr)
     DebugMessage(M64MSG_ERROR, "Compile at bogus memory address: %x", (int)addr);
     exit(1);
   }
+
+  if(aot_mode==AOT_EMIT) source=aot_emit_source; // the logged words, not guest memory
 
   /* Pass 1: disassemble */
   /* Pass 2: register dependencies, branch targets */
@@ -9467,8 +9515,9 @@ static int new_recompile_block_impl(int addr)
         // Stop on BREAK
         if((source[i+1]&0xfc00003f)==0x0d) done=1;
       }
-      // Don't recompile stuff that's already compiled
-      if(check_addr(start+i*4+4)) done=1;
+      // Don't recompile stuff that's already compiled (not under AOT: a block's extent is
+      // then a function of its guest words alone, not of what happens to be compiled)
+      if(!aot_mode&&check_addr(start+i*4+4)) done=1;
       // Don't get too close to the limit
       if(i>MAXBLOCK/2) done=1;
     }
@@ -11833,7 +11882,7 @@ static int new_recompile_block_impl(int addr)
     if(!link_addr[i][2])
     {
       void *stub=out;
-      void *addr=check_addr(link_addr[i][1]);
+      void *addr=aot_mode?NULL:check_addr(link_addr[i][1]);
       emit_extjump(link_addr[i][0],link_addr[i][1]);
 #ifndef DISABLE_BLOCK_LINKING
 #if NEW_DYNAREC==NEW_DYNAREC_ARM64
@@ -11887,6 +11936,7 @@ static int new_recompile_block_impl(int addr)
           dirty_entry_count++;
           intptr_t entry_point=do_dirty_stub(i,head);
           head->clean_addr=(void*)entry_point;
+          aot_note_entry(vaddr,0,head->addr,head->clean_addr,1);
           head=ll_add(jump_in+page,vaddr,(void *)entry_point,(void *)entry_point,start,copy,slen*4);
           // If there was an existing entry in the hash table,
           // replace it with the new address.
@@ -11917,6 +11967,7 @@ static int new_recompile_block_impl(int addr)
           dirty_entry_count++;
           intptr_t entry_point=do_dirty_stub(i,head);
           head->clean_addr=(void*)entry_point;
+          aot_note_entry(vaddr,r,head->addr,head->clean_addr,0);
           (void)ll_add_32(jump_in+page,vaddr,r,(void *)entry_point,(void *)entry_point,start,copy,slen*4);
         }
       }
@@ -11939,6 +11990,7 @@ static int new_recompile_block_impl(int addr)
   cache_flush((char *)beginning_rx,(char *)out_rx);
   #endif
 
+  aot_block_end=out;
   // If we're within 256K of the end of the buffer,
   // start over from the beginning. (Is 256K enough?)
   if(out > (u_char *)((u_char *)base_addr+(1<<TARGET_SIZE_2)-MAX_OUTPUT_BLOCK_SIZE-JUMP_TABLE_SIZE))
@@ -12010,13 +12062,415 @@ static int new_recompile_block_impl(int addr)
     expirep=(expirep+1)&65535;
   }
   block_log_compiled(start, slen, source);
+  aot_block_compiled(addr, beginning);
   return 0;
 }
 
 int new_recompile_block(int addr)
 {
+  if(aot_mode==AOT_LOAD) return aot_install(addr);
   jit_write_begin();
   int ret = new_recompile_block_impl(addr);
   jit_write_end();
   return ret;
+}
+
+/**** retro-trainer PLAN-handheld HH-33: the AOT form (AOT_* at the top of this file) ****/
+#include <dlfcn.h>
+#include <unistd.h>
+#if defined(__APPLE__)
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+#include <libproc.h>
+#endif
+
+/* The image's meta file, words little-endian: this header, then per block
+ *   addr, slen, code_off, code_len, nentries, using_tlb, words[slen+1],
+ *   entries[nentries] of (vaddr, reg32, dirty_off, clean_off, ht_replace).
+ * The fields after `version` are the fingerprint a load refuses a mismatch of: the hot state's
+ * layout the code addresses off FP, the import table's length, and the timing constants the
+ * code bakes in. The core's own build (which orders aot_imports) is not yet in it. */
+struct aot_image_header {
+  u_int magic, version;
+  u_int hot_state_size, fp_imports, fp_mmap, import_count, count_per_op, count_per_op_denom_pot;
+  u_int nblocks, code_size;
+};
+#define AOT_MAGIC 0x31415452 /* "RTA1" */
+#define AOT_VERSION 1
+
+struct aot_entry { u_int vaddr, reg32, dirty_off, clean_off, ht_replace; };
+struct aot_block {
+  u_int addr, slen, code_off, code_len, nentries, using_tlb;
+  const u_int *words;               // slen+1: the block's words and the one its end looked at
+  const struct aot_entry *entries;
+};
+
+static struct {
+  unsigned long compiled, wraps, installs, lookahead, orphans, emitted, emit_skipped, emit_differs;
+} aot_stats;
+
+static struct aot_entry aot_entries[MAXBLOCK+1]; // the entry points of the block being compiled
+static int aot_entry_count;
+
+static int aot_mode_from_env(void)
+{
+  const char *m=getenv("M64P_AOT");
+  if(!m||!*m) return AOT_OFF;
+  if(!strcmp(m,"shape")) return AOT_SHAPE;
+  if(!strcmp(m,"emit")) return AOT_EMIT;
+  if(!strcmp(m,"load")) return AOT_LOAD;
+  AOT_CHECK(0,"M64P_AOT=%s is none of shape, emit, load",m);
+  return AOT_OFF;
+}
+
+/* new_dyna_start's first block: stock compiles 0xa4000040 at the cache's start and enters there;
+ * the AOT forms enter it the way every later block is entered. */
+void *new_dyna_first_block(void)
+{
+  if(aot_mode==AOT_OFF) {
+    void *first=base_addr_rx;
+    new_recompile_block(0xa4000040);
+    return first;
+  }
+  return get_addr_ht(0xa4000040);
+}
+
+static int aot_expiring(void *addr)
+{
+  if(aot_mode==AOT_LOAD) return 0; // an image block is never overwritten
+  return !((((uintptr_t)addr-(uintptr_t)out)<<(32-TARGET_SIZE_2))>0x60000000+(MAX_OUTPUT_BLOCK_SIZE<<(32-TARGET_SIZE_2)));
+}
+
+static void aot_note_entry(u_int vaddr, u_int reg32, void *dirty, void *clean, int ht_replace)
+{
+  if(aot_mode==AOT_OFF) return;
+  AOT_CHECK(aot_entry_count<MAXBLOCK+1,"too many entry points in one block");
+  struct aot_entry *e=&aot_entries[aot_entry_count++];
+  e->vaddr=vaddr; e->reg32=reg32; e->ht_replace=ht_replace;
+  e->dirty_off=(u_int)(uintptr_t)dirty; e->clean_off=(u_int)(uintptr_t)clean; // made offsets below
+}
+
+/* An AOT-shaped dirty stub's check (linkage_arm64.S verify_code_aot): the ll_entry whose dirty
+ * stub is `stub`, verified as verify_code verifies the one it is handed. */
+u_int verify_dirty_at(void *stub, u_int vaddr)
+{
+  struct r4300_core* r4300 = &g_dev.r4300;
+  u_int vpage=(vaddr^0x80000000)>>12;
+  if(vpage>262143&&r4300->cp0.tlb.LUT_r[vaddr>>12]) vpage&=2047;
+  if(vpage>2048) vpage=2048+(vpage&2047);
+  struct ll_entry *head;
+  for(head=jump_dirty[vpage];head;head=head->next)
+    if(head->vaddr==vaddr&&(void*)(((intptr_t)head->addr-(intptr_t)base_addr)+(intptr_t)base_addr_rx)==stub)
+      return verify_dirty(head);
+  aot_stats.orphans++; // no entry names it: treat the code as dirty, which recompiles
+  return vaddr;
+}
+
+static uint64_t aot_fnv(const void *p, size_t n)
+{
+  uint64_t h=1469598103934665603ULL;
+  const unsigned char *b=(const unsigned char *)p;
+  while(n--) { h^=*b++; h*=1099511628211ULL; }
+  return h;
+}
+
+/* ---- shape: the compile log ---- */
+static FILE *aot_log;
+
+/* ---- emit: the image being written ---- */
+static u_char *aot_out_code; static size_t aot_out_code_len, aot_out_code_cap;
+static u_int *aot_out_meta; static size_t aot_out_meta_len, aot_out_meta_cap;
+static u_int aot_out_blocks;
+static uint64_t aot_emit_expect_hash; static u_int aot_emit_expect_len;
+
+static void aot_meta_push(u_int w)
+{
+  if(aot_out_meta_len==aot_out_meta_cap) {
+    aot_out_meta_cap=aot_out_meta_cap?aot_out_meta_cap*2:65536;
+    aot_out_meta=(u_int*)realloc(aot_out_meta,aot_out_meta_cap*4);
+    AOT_CHECK(aot_out_meta,"out of memory");
+  }
+  aot_out_meta[aot_out_meta_len++]=w;
+}
+
+static void aot_block_compiled(int addr, uintptr_t beginning)
+{
+  if(aot_mode==AOT_OFF) return;
+  int n=aot_entry_count;
+  aot_entry_count=0;
+  aot_stats.compiled++;
+  if((u_char*)out<aot_block_end) aot_stats.wraps++;
+  size_t len=(size_t)(aot_block_end-(u_char*)beginning);
+  uint64_t h=aot_fnv((void*)beginning,len);
+  int k;
+  for(k=0;k<n;k++) { // absolute -> block-relative
+    aot_entries[k].dirty_off-=(u_int)beginning;
+    aot_entries[k].clean_off-=(u_int)beginning;
+  }
+  if(aot_mode==AOT_SHAPE&&aot_log) {
+    fprintf(aot_log,"%08x %d %d %u %016llx %d",(u_int)addr,slen,using_tlb?1:0,(u_int)len,(unsigned long long)h,n);
+    for(k=0;k<=slen;k++) fprintf(aot_log," %08x",source[k]);
+    fputc('\n',aot_log);
+  }
+  if(aot_mode==AOT_EMIT) {
+    if(len!=aot_emit_expect_len||h!=aot_emit_expect_hash) {
+      if(aot_stats.emit_differs++<10)
+        fprintf(stderr,"new_dynarec AOT emit: %08x re-emits as %u bytes %016llx, the JIT ran %u bytes %016llx\n",
+          (u_int)addr,(u_int)len,(unsigned long long)h,aot_emit_expect_len,(unsigned long long)aot_emit_expect_hash);
+    }
+    if(aot_out_code_len+len>aot_out_code_cap) {
+      aot_out_code_cap=(aot_out_code_len+len)*2;
+      aot_out_code=(u_char*)realloc(aot_out_code,aot_out_code_cap);
+      AOT_CHECK(aot_out_code,"out of memory");
+    }
+    u_int off=(u_int)aot_out_code_len;
+    memcpy(aot_out_code+off,(void*)beginning,len);
+    aot_out_code_len+=len;
+    aot_meta_push((u_int)addr); aot_meta_push((u_int)slen); aot_meta_push(off); aot_meta_push((u_int)len);
+    aot_meta_push((u_int)n); aot_meta_push(using_tlb?1:0);
+    for(k=0;k<=slen;k++) aot_meta_push(source[k]);
+    for(k=0;k<n;k++) {
+      aot_meta_push(aot_entries[k].vaddr); aot_meta_push(aot_entries[k].reg32);
+      aot_meta_push(aot_entries[k].dirty_off); aot_meta_push(aot_entries[k].clean_off);
+      aot_meta_push((u_int)aot_entries[k].ht_replace);
+    }
+    aot_out_blocks++;
+    aot_stats.emitted++;
+  }
+}
+
+static void aot_header(struct aot_image_header *h, u_int nblocks, u_int code_size)
+{
+  h->magic=AOT_MAGIC; h->version=AOT_VERSION;
+  h->hot_state_size=(u_int)sizeof(struct new_dynarec_hot_state);
+  h->fp_imports=(u_int)fp_aot_imports; h->fp_mmap=(u_int)fp_memory_map;
+  h->import_count=(u_int)AOT_IMPORT_COUNT;
+  h->count_per_op=g_dev.r4300.cp0.count_per_op;
+  h->count_per_op_denom_pot=g_dev.r4300.cp0.count_per_op_denom_pot;
+  h->nblocks=nblocks; h->code_size=code_size;
+}
+
+/* emit: one block a shape log lists, as the record the log wrote */
+struct aot_record { u_int addr, slen, tlb, code_len, nentries; uint64_t code_hash, key; u_int *words; };
+
+static int aot_record_cmp(const void *a, const void *b)
+{
+  const struct aot_record *x=(const struct aot_record *)a, *y=(const struct aot_record *)b;
+  if(x->key!=y->key) return x->key<y->key?-1:1;
+  if(x->addr!=y->addr) return x->addr<y->addr?-1:1;
+  if(x->slen!=y->slen) return x->slen<y->slen?-1:1;
+  return memcmp(x->words,y->words,(x->slen+1)*4);
+}
+
+static void aot_emit_all(void)
+{
+  const char *in=getenv("M64P_AOT_BLOCKS"), *outp=getenv("M64P_AOT_OUT");
+  AOT_CHECK(in&&outp,"emit needs M64P_AOT_BLOCKS and M64P_AOT_OUT");
+  FILE *f=fopen(in,"r");
+  AOT_CHECK(f,"cannot read %s",in);
+  size_t n=0,cap=0;
+  struct aot_record *recs=NULL;
+  unsigned long long hash;
+  struct aot_record r;
+  while(fscanf(f,"%x %u %u %u %llx %u",&r.addr,&r.slen,&r.tlb,&r.code_len,&hash,&r.nentries)==6) {
+    r.code_hash=hash;
+    AOT_CHECK(r.slen>0&&r.slen<MAXBLOCK,"a block of %u words in %s",r.slen,in);
+    r.words=(u_int*)calloc(r.slen+1+64,4); // zero past the logged words, which no compile reads
+    AOT_CHECK(r.words,"out of memory");
+    u_int k;
+    for(k=0;k<=r.slen;k++) AOT_CHECK(fscanf(f,"%x",&r.words[k])==1,"a short record in %s",in);
+    r.key=aot_fnv(r.words,(r.slen+1)*4)^((uint64_t)r.addr<<32)^r.slen;
+    if(n==cap) { cap=cap?cap*2:4096; recs=(struct aot_record*)realloc(recs,cap*sizeof *recs); AOT_CHECK(recs,"out of memory"); }
+    recs[n++]=r;
+  }
+  fclose(f);
+  qsort(recs,n,sizeof *recs,aot_record_cmp);
+  size_t i,unique=0;
+  for(i=0;i<n;i++) {
+    if(i>0&&aot_record_cmp(&recs[i-1],&recs[i])==0) continue; // the same block compiled again
+    unique++;
+    aot_emit_source=recs[i].words;
+    using_tlb=recs[i].tlb;
+    aot_emit_expect_hash=recs[i].code_hash; aot_emit_expect_len=recs[i].code_len;
+    aot_entry_count=0;
+    if(new_recompile_block_impl((int)recs[i].addr)!=0) { aot_stats.emit_skipped++; continue; }
+    AOT_CHECK((u_int)slen==recs[i].slen,"%08x re-emits as %d words, the log says %u",recs[i].addr,slen,recs[i].slen);
+  }
+  struct aot_image_header h;
+  aot_header(&h,aot_out_blocks,(u_int)aot_out_code_len);
+  char path[4096];
+  snprintf(path,sizeof path,"%s.code",outp);
+  f=fopen(path,"wb"); AOT_CHECK(f,"cannot write %s",path);
+  AOT_CHECK(fwrite(aot_out_code,1,aot_out_code_len,f)==aot_out_code_len,"short write %s",path); fclose(f);
+  snprintf(path,sizeof path,"%s.meta",outp);
+  f=fopen(path,"wb"); AOT_CHECK(f,"cannot write %s",path);
+  AOT_CHECK(fwrite(&h,sizeof h,1,f)==1&&fwrite(aot_out_meta,4,aot_out_meta_len,f)==aot_out_meta_len,"short write %s",path);
+  fclose(f);
+  fprintf(stderr,"new_dynarec AOT emit: %lu records, %lu blocks, %lu emitted (%lu bytes), %lu skipped, %lu differ from the JIT's\n",
+    (unsigned long)n,(unsigned long)unique,aot_stats.emitted,(unsigned long)aot_out_code_len,aot_stats.emit_skipped,aot_stats.emit_differs);
+  fflush(stderr);
+  _exit(aot_stats.emit_differs?3:0);
+}
+
+/* ---- load: the image ---- */
+static const u_char *aot_code;
+static struct aot_block *aot_blocks; static u_int aot_nblocks;
+
+static int aot_block_cmp(const void *a, const void *b)
+{
+  u_int x=((const struct aot_block *)a)->addr, y=((const struct aot_block *)b)->addr;
+  return x<y?-1:x>y;
+}
+
+static void aot_vm_report(const char *when)
+{
+#if defined(__APPLE__)
+  mach_vm_address_t a=0; mach_vm_size_t size;
+  vm_region_basic_info_data_64_t info; mach_msg_type_number_t count; mach_port_t object;
+  int x=0,rwx=0,anon=0;
+  for(;;) {
+    count=VM_REGION_BASIC_INFO_COUNT_64;
+    if(mach_vm_region(mach_task_self(),&a,&size,VM_REGION_BASIC_INFO_64,(vm_region_info_t)&info,&count,&object)!=KERN_SUCCESS) break;
+    if(info.protection&VM_PROT_EXECUTE) {
+      char path[PROC_PIDPATHINFO_MAXSIZE];
+      int file=proc_regionfilename(getpid(),a,path,sizeof path)>0;
+      x++;
+      if(info.protection&VM_PROT_WRITE) { rwx++; fprintf(stderr,"new_dynarec AOT vm: rwx %llx+%llx %s\n",(unsigned long long)a,(unsigned long long)size,file?path:"(no file)"); }
+      if(!file) { anon++; fprintf(stderr,"new_dynarec AOT vm: executable, no file: %llx+%llx prot %x\n",(unsigned long long)a,(unsigned long long)size,info.protection); }
+    }
+    a+=size;
+  }
+  fprintf(stderr,"new_dynarec AOT vm (%s): %d executable regions, %d writable and executable, %d executable with no file\n",when,x,rwx,anon);
+#else
+  (void)when;
+#endif
+}
+
+static void aot_atexit(void)
+{
+  fprintf(stderr,"new_dynarec AOT (%s): %lu compiled, %lu cache wraps, %lu installed, %lu lookahead differs, %lu orphan stubs\n",
+    aot_mode==AOT_SHAPE?"shape":aot_mode==AOT_LOAD?"load":"emit",
+    aot_stats.compiled,aot_stats.wraps,aot_stats.installs,aot_stats.lookahead,aot_stats.orphans);
+  if(aot_log) fflush(aot_log);
+  aot_vm_report("exit");
+}
+
+static void aot_load_image(void)
+{
+  if(aot_blocks) return; // a reset re-inits the dynarec; the image stays loaded
+  const char *path=getenv("M64P_AOT_IMAGE");
+  AOT_CHECK(path,"load needs M64P_AOT_IMAGE");
+  void *lib=dlopen(path,RTLD_NOW|RTLD_LOCAL);
+  AOT_CHECK(lib,"dlopen %s: %s",path,dlerror());
+  aot_code=(const u_char*)dlsym(lib,"rt_aot_code");
+  const u_int *meta=(const u_int*)dlsym(lib,"rt_aot_meta");
+  const u_int *meta_end=(const u_int*)dlsym(lib,"rt_aot_meta_end");
+  AOT_CHECK(aot_code&&meta&&meta_end,"%s lacks rt_aot_code/rt_aot_meta/rt_aot_meta_end",path);
+  struct aot_image_header want, h;
+  memcpy(&h,meta,sizeof h);
+  aot_header(&want,h.nblocks,h.code_size);
+  AOT_CHECK(!memcmp(&h,&want,sizeof h),
+    "%s was emitted for another core (magic %x/%x v%u/%u, hot state %u/%u, imports at %u/%u, memory_map at %u/%u, %u/%u imports, count_per_op %u/%u, denom %u/%u)",
+    path,h.magic,want.magic,h.version,want.version,h.hot_state_size,want.hot_state_size,h.fp_imports,want.fp_imports,
+    h.fp_mmap,want.fp_mmap,h.import_count,want.import_count,h.count_per_op,want.count_per_op,h.count_per_op_denom_pot,want.count_per_op_denom_pot);
+  const u_int *p=meta+sizeof h/4;
+  aot_nblocks=h.nblocks;
+  aot_blocks=(struct aot_block*)calloc(aot_nblocks,sizeof *aot_blocks);
+  AOT_CHECK(aot_blocks,"out of memory");
+  u_int i;
+  for(i=0;i<aot_nblocks;i++) {
+    struct aot_block *b=&aot_blocks[i];
+    AOT_CHECK(p+6<=meta_end,"%s: meta ends inside block %u",path,i);
+    b->addr=p[0]; b->slen=p[1]; b->code_off=p[2]; b->code_len=p[3]; b->nentries=p[4]; b->using_tlb=p[5];
+    b->words=p+6;
+    b->entries=(const struct aot_entry*)(p+6+b->slen+1);
+    p+=6+b->slen+1+5*b->nentries;
+    AOT_CHECK(p<=meta_end&&b->code_off+b->code_len<=h.code_size,"%s: block %u overruns the image",path,i);
+  }
+  AOT_CHECK(p==meta_end,"%s: %ld words of meta after the last block",path,(long)(meta_end-p));
+  qsort(aot_blocks,aot_nblocks,sizeof *aot_blocks,aot_block_cmp);
+  fprintf(stderr,"new_dynarec AOT load: %s: %u blocks, %u bytes of code at %p\n",path,aot_nblocks,h.code_size,(void*)aot_code);
+}
+
+static void aot_init(void)
+{
+  static int registered;
+  if(aot_mode==AOT_OFF) return;
+  if(!registered) { registered=1; atexit(aot_atexit); }
+  if(aot_mode==AOT_SHAPE) {
+    const char *path=getenv("M64P_AOT_LOG");
+    if(path&&*path&&!aot_log) { aot_log=fopen(path,"w"); AOT_CHECK(aot_log,"cannot write %s",path); }
+  }
+  if(aot_mode==AOT_EMIT) aot_emit_all();
+  if(aot_mode==AOT_LOAD) { aot_load_image(); aot_vm_report("load"); }
+}
+
+/* load: where the JIT would compile the block at `addr`, install the image's block that starts
+ * there and holds the words guest memory holds now, registered exactly as the compile would have
+ * registered it (new_recompile_block_impl's pass 9 and its write traps). */
+static int aot_install(int addr)
+{
+  struct r4300_core* r4300 = &g_dev.r4300;
+  u_int start=(u_int)addr&~3;
+  const u_int *src;
+  if((int)addr>=(int)0xa0000000&&(int)addr<(int)0xa07fffff) src=(u_int*)((uintptr_t)g_dev.rdram.dram+start-0xa0000000);
+  else if((int)addr>=(int)0xa4000000&&(int)addr<(int)0xa4001000) src=(u_int*)((uintptr_t)g_dev.sp.mem+start-0xa4000000);
+  else if((int)addr>=(int)0x80000000&&(int)addr<(int)0x80800000) src=(u_int*)((uintptr_t)g_dev.rdram.dram+start-(uintptr_t)0x80000000);
+  else if((signed int)addr>=(signed int)0xC0000000) {
+    if((intptr_t)r4300->new_dynarec_hot_state.memory_map[start>>12]<0) return 1; // the caller raises the TLB miss
+    src=(u_int*)((uintptr_t)(start+(uintptr_t)(r4300->new_dynarec_hot_state.memory_map[start>>12]<<2)));
+  }
+  else { AOT_CHECK(0,"a block at bogus address %x",(u_int)addr); return 1; }
+
+  struct aot_block key; key.addr=(u_int)addr;
+  struct aot_block *b=(struct aot_block*)bsearch(&key,aot_blocks,aot_nblocks,sizeof key,aot_block_cmp);
+  int candidates=0;
+  if(b) {
+    while(b>aot_blocks&&b[-1].addr==(u_int)addr) b--;
+    for(;b<aot_blocks+aot_nblocks&&b->addr==(u_int)addr;b++) {
+      candidates++;
+      if(memcmp(src,b->words,b->slen*4)) continue;
+      if(src[b->slen]!=b->words[b->slen]) aot_stats.lookahead++;
+      u_int len=b->slen*4, k;
+      char *cp=(char*)malloc(len+4);
+      AOT_CHECK(cp,"out of memory");
+      memcpy(cp,src,len);
+      ((u_int*)cp)[b->slen]=b->nentries; // copy's trailer: how many entries share it
+      copy_size+=len+4;
+      u_char *code=(u_char*)aot_code+b->code_off;
+      for(k=0;k<b->nentries;k++) {
+        const struct aot_entry *e=&b->entries[k];
+        u_int vaddr=e->vaddr;
+        u_int page=(0x80000000^vaddr)>>12;
+        u_int vpage=page;
+        if(page>262143&&r4300->cp0.tlb.LUT_r[vaddr>>12]) page=(r4300->cp0.tlb.LUT_r[page^0x80000]^0x80000000)>>12;
+        if(page>2048) page=2048+(page&2047);
+        if(vpage>262143&&r4300->cp0.tlb.LUT_r[vaddr>>12]) vpage&=2047;
+        if(vpage>2048) vpage=2048+(vpage&2047);
+        struct ll_entry *head=ll_add_32(jump_dirty+vpage,vaddr,e->reg32,code+e->dirty_off,NULL,start,cp,len);
+        head->clean_addr=code+e->clean_off;
+        struct ll_entry *in=ll_add_32(jump_in+page,vaddr,e->reg32,head->clean_addr,head->clean_addr,start,cp,len);
+        if(e->ht_replace) {
+          struct ll_entry **ht_bin=hash_table[((vaddr>>16)^vaddr)&0xFFFF];
+          if(ht_bin[0]&&ht_bin[0]->vaddr==vaddr) ht_bin[0]=in;
+          if(ht_bin[1]&&ht_bin[1]->vaddr==vaddr) ht_bin[1]=in;
+        }
+      }
+      int i,j;
+      for(i=start>>12;i<=(int)((start+len-4)>>12);i++) {
+        r4300->cached_interp.invalid_code[i]=0;
+        r4300->new_dynarec_hot_state.memory_map[i]|=WRITE_PROTECT;
+        if((signed int)start>=(signed int)0xC0000000) {
+          j=(((uintptr_t)i<<12)+(uintptr_t)(r4300->new_dynarec_hot_state.memory_map[i]<<2)-(uintptr_t)g_dev.rdram.dram+(uintptr_t)0x80000000)>>12;
+          r4300->cached_interp.invalid_code[j]=0;
+          r4300->new_dynarec_hot_state.memory_map[j]|=WRITE_PROTECT;
+        }
+      }
+      aot_stats.installs++;
+      return 0;
+    }
+  }
+  AOT_CHECK(0,"miss at %08x: the image holds %d block(s) starting there, none with its words (%08x %08x %08x %08x)",
+    (u_int)addr,candidates,src[0],src[1],src[2],src[3]);
+  return 1;
 }

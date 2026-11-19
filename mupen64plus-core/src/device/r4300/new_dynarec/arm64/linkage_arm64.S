@@ -49,6 +49,8 @@
 #define get_addr_ht          _get_addr_ht
 #define get_addr             _get_addr
 #define verify_dirty         _verify_dirty
+#define verify_dirty_at      _verify_dirty_at
+#define new_dyna_first_block _new_dyna_first_block
 #define dynarec_gen_interrupt _dynarec_gen_interrupt
 #define cop1_unusable        _cop1_unusable
 #define SYSCALL_new          _SYSCALL_new
@@ -224,6 +226,19 @@ GLOBAL_FUNCTION(verify_code):
     bl     get_addr
     br     x0
 
+/* retro-trainer HH-33: an AOT-shaped dirty stub's check, x0 = the stub, w1 = its vaddr
+   (verify_dirty_at finds the ll_entry that verify_code is handed in x0) */
+GLOBAL_FUNCTION(verify_code_aot):
+    mov    x21, x30 /* Save link register */
+    bl     verify_dirty_at
+    tst    x0, x0
+    b.ne   1f
+    mov    x30, x21 /* Restore link register */
+    ret
+1:
+    bl     get_addr
+    br     x0
+
 GLOBAL_FUNCTION(cc_interrupt):
     str    w20, [x29, #fp_cycle_count]
     str    wzr, [x29, #fp_pending_exception]
@@ -293,9 +308,6 @@ GLOBAL_FUNCTION(new_dyna_start):
     add    x16, x16, PAGEOFF(g_dev)
     movl   x1, (device_r4300_new_dynarec_hot_state_dynarec_local + saved_context)
     add    x16, x16, x1
-    adrp   x1, PAGE(base_addr_rx)
-    add    x1, x1, PAGEOFF(base_addr_rx)
-    mov    w0, #0xa4000000
     stp    x19,x20,[x16,#0]
     stp    x21,x22,[x16,#16]
     stp    x23,x24,[x16,#32]
@@ -303,11 +315,10 @@ GLOBAL_FUNCTION(new_dyna_start):
     stp    x27,x28,[x16,#64]
     stp    x29,x30,[x16,#80]
     sub    x29, x16, #saved_context
-    ldr    x19, [x1]
-    add    w0, w0, #0x40
-    bl     new_recompile_block
+    /* the host address of the block at 0xa4000040 (new_dyna_first_block) */
+    bl     new_dyna_first_block
     ldr    w20, [x29, #fp_cycle_count]
-    br     x19
+    br     x0
 
 GLOBAL_FUNCTION(breakpoint):
     brk 0
