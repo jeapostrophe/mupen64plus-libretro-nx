@@ -2075,6 +2075,26 @@ void retro_run (void)
 
     co_switch(game_thread);
 
+    {
+       /* LANE-ONLY DIAGNOSTIC (retro-trainer lane hh33b, never pushed): M64P_RDRAM_DUMP=N,N,...
+          writes RDRAM after the Nth retro_run to $M64P_RDRAM_DUMP_DIR/f<N>.ram */
+       static unsigned long runs;
+       const char *at = getenv("M64P_RDRAM_DUMP");
+       runs++;
+       if (at) {
+          char key[32];
+          snprintf(key, sizeof key, ",%lu,", runs);
+          char list[4096];
+          snprintf(list, sizeof list, ",%s,", at);
+          if (strstr(list, key)) {
+             char path[4096];
+             snprintf(path, sizeof path, "%s/f%lu.ram", getenv("M64P_RDRAM_DUMP_DIR"), runs);
+             FILE *f = fopen(path, "wb");
+             if (f) { fwrite(g_dev.rdram.dram, 1, g_dev.rdram.dram_size, f); fclose(f); }
+          }
+       }
+    }
+
     if(current_rdp_type == RDP_PLUGIN_GLIDEN64)
     {
        glsm_ctl(GLSM_CTL_STATE_UNBIND, NULL);
