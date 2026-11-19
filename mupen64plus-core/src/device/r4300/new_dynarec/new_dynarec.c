@@ -3188,6 +3188,12 @@ void dynarec_gen_interrupt(void)
     struct r4300_core* r4300 = &g_dev.r4300;
     struct new_dynarec_hot_state* state = &r4300->new_dynarec_hot_state;
     cp0_update_count(r4300);
+    { /* LANE-ONLY DIAGNOSTIC (retro-trainer lane hh33c, never pinned): M64P_INT_LOG=<path> logs
+         each interrupt check that fires: Count and the pc it returns to */
+      static FILE *intlog; static int intlog_init;
+      if(!intlog_init) { const char *p=getenv("M64P_INT_LOG"); intlog_init=1; if(p) intlog=fopen(p,"w"); }
+      if(intlog) fprintf(intlog,"%08x %08x %d\n",state->cp0_regs[CP0_COUNT_REG],state->pcaddr,state->cycle_count);
+    }
     uint32_t page = ((state->cp0_regs[CP0_COUNT_REG]>>19)&0x1fc);
     unsigned int *candidate = (unsigned int *)&restore_candidate[page];
     page <<= 3;
