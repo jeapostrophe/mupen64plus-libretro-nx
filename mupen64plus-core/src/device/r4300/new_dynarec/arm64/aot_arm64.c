@@ -617,7 +617,9 @@ static int aot_from_image(int addr, int *ret)
  * - A taken branch to itself whose delay slot is a NOP is an idle loop: the count becomes
  *   max(count,0) + 2*count_per_op and the interrupt is taken.
  * - A helper sees the count as it would be at its instruction: memory accesses (the read and write
- *   stubs) at k+1, MFC0, TLBWI, TLBWR and ERET at k, MTC0 at k (Status: k+1).
+ *   stubs) at k+1, MFC0, TLBWI, TLBWR and ERET at k, MTC0 at k (Status: k+1). After a write stub,
+ *   and MTC0 of Count, Compare or Status, the code reloads the count the helper left; after any
+ *   other helper it keeps its own, so a rebase the helper made (an event scheduled) is lost.
  * - Falling through to the next block adds the count without a check, as does handing back here.
  * Which instructions make up a block does not matter to this model, so the interpreter runs from
  * the missed address until a branch resolves, then hands its target to get_addr_ht, which finds
@@ -666,6 +668,19 @@ static u_int aot_fetch(u_int pc, int *ok)
   return src?*src:0;
 }
 
+// the instructions the dynarec runs through a write stub (do_writestub, inline_writestub)
+static int aot_is_store(enum r4300_opcode op)
+{
+  switch(op) {
+  case R4300_OP_SB: case R4300_OP_SH: case R4300_OP_SW: case R4300_OP_SWL: case R4300_OP_SWR:
+  case R4300_OP_SD: case R4300_OP_SDL: case R4300_OP_SDR: case R4300_OP_SC: case R4300_OP_SCD:
+  case R4300_OP_SWC1: case R4300_OP_SDC1:
+    return 1;
+  default:
+    return 0;
+  }
+}
+
 /* Run the non-branch instruction iw at pc, k instructions after the last branch, as the dynarec's
  * helpers would see it. Returns nonzero when it raised an exception (pcaddr is then the handler). */
 static int aot_interp_one(u_int pc, u_int iw, int k, int ds)
@@ -680,22 +695,35 @@ static int aot_interp_one(u_int pc, u_int iw, int k, int ds)
     u_int copr=(iw>>11)&0x1f;
     st->fake_pc.f.r.rt=&st->rt;
     st->rt=(int64_t)(int32_t)r4300_regs(r4300)[(iw>>16)&0x1f];
+    int before=st->cycle_count;
     MTC0_new(copr,cpo*(k+(copr==CP0_STATUS_REG)),pc);
-    return (copr==CP0_COUNT_REG||copr==CP0_STATUS_REG)&&st->pending_exception;
+    if(copr==CP0_COUNT_REG||copr==CP0_STATUS_REG) return st->pending_exception; // do_interrupt
+    if(copr!=CP0_COMPARE_REG) st->cycle_count=before; // only these three reload the count
+    return 0;
   }
-  case R4300_OP_TLBWI: TLBWI_new(pc,cpo*k); return 0;
-  case R4300_OP_TLBWR: TLBWR_new(pc,cpo*k); return 0;
+  case R4300_OP_TLBWI: case R4300_OP_TLBWR: { // cop0_assemble does not reload the count after them
+    int before=st->cycle_count;
+    if(idec->opcode==R4300_OP_TLBWI) TLBWI_new(pc,cpo*k); else TLBWR_new(pc,cpo*k);
+    st->cycle_count=before;
+    return 0;
+  }
   default: break;
   }
   st->fake_pc.addr=pc;
   r4300_decode(&st->fake_pc,r4300,idec,iw,0,NULL);
   int count=cpo*(k+(idec->opcode!=R4300_OP_MFC0)); // MFC0_new's count, else a stub's
+  int before=st->cycle_count;
   st->pcaddr=pc;
   r4300->delay_slot=ds;
   st->cycle_count+=count; // UPDATE_COUNT_IN
   st->pending_exception=0;
   st->fake_pc.ops();
-  if(!st->pending_exception) st->cycle_count-=count; // UPDATE_COUNT_OUT
+  if(!st->pending_exception) { // UPDATE_COUNT_OUT, then the stub's reload of the count, or not
+    st->cycle_count-=count;
+    // a write stub reloads the count the helper left (an event it scheduled rebases it); every
+    // other helper call keeps the count the code held, whatever the helper did to it
+    if(!aot_is_store(idec->opcode)) st->cycle_count=before;
+  }
   r4300->delay_slot=0;
   return st->pending_exception;
 }
