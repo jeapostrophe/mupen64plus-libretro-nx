@@ -2660,8 +2660,16 @@ static struct ll_entry *get_dirty(struct r4300_core* r4300,u_int vaddr,u_int fla
   return NULL;
 }
 
+/* LANE-ONLY DIAGNOSTIC (lane hh33c): M64P_FLOW_LOG logs each looked-up vaddr */
+static void lane_flow(u_int vaddr,char k)
+{
+  static FILE *f; static int init;
+  if(!init) { const char *p=getenv("M64P_FLOW_LOG"); init=1; if(p) f=fopen(p,"w"); }
+  if(f) fprintf(f,"%c %08x %d\n",k,vaddr,g_dev.r4300.new_dynarec_hot_state.cycle_count);
+}
 static void *dynamic_linker_impl(void * src, u_int vaddr)
 {
+  lane_flow(vaddr,'L');
   assert((vaddr&1)==0);
   struct r4300_core* r4300 = &g_dev.r4300;
   struct ll_entry *head;
@@ -2733,6 +2741,7 @@ void *dynamic_linker(void * src, u_int vaddr)
 
 static void *dynamic_linker_ds_impl(void * src, u_int vaddr)
 {
+  lane_flow(vaddr,'D');
   struct r4300_core* r4300 = &g_dev.r4300;
   struct ll_entry *head;
 
@@ -2843,6 +2852,7 @@ void *get_addr(u_int vaddr)
 // Look up address in hash table first
 void *get_addr_ht(u_int vaddr)
 {
+  lane_flow(vaddr,'H');
   struct ll_entry **ht_bin=hash_table[((vaddr>>16)^vaddr)&0xFFFF];
   if(ht_bin[0]&&ht_bin[0]->vaddr==vaddr) return (void *)(((intptr_t)ht_bin[0]->addr-(intptr_t)base_addr)+(intptr_t)base_addr_rx);
   if(ht_bin[1]&&ht_bin[1]->vaddr==vaddr) return (void *)(((intptr_t)ht_bin[1]->addr-(intptr_t)base_addr)+(intptr_t)base_addr_rx);
