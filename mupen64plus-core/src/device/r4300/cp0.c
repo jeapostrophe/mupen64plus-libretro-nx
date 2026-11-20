@@ -176,7 +176,7 @@ void cp0_update_count(struct r4300_core* r4300)
              update: Count and pcaddr */
           static FILE *log; static int init;
           if(!init) { const char *p=getenv("M64P_UPD_LOG"); init=1; if(p) log=fopen(p,"w"); }
-          if(log) fprintf(log,"%08x %08x\n",cp0_regs[CP0_COUNT_REG],r4300->new_dynarec_hot_state.pcaddr);
+          if(log) fprintf(log,"%08x %08x %08x %d\n",cp0_regs[CP0_COUNT_REG],r4300->new_dynarec_hot_state.pcaddr,*r4300_cp0_next_interrupt(cp0),*r4300_cp0_cycle_count(cp0));
         }
     }
 #endif
