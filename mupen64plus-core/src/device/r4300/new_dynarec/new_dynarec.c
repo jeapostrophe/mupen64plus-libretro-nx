@@ -4674,6 +4674,15 @@ static void do_cc(int i,signed char i_regmap[],int *adj,int addr,int taken,int i
   add_stub(CC_STUB,jaddr,idle?idle:(intptr_t)out,(*adj==0||invert||idle)?0:(count+2),i,addr,taken,0);
 }
 
+/* LANE-ONLY DIAGNOSTIC (retro-trainer lane hh33c): M64P_CCSTALE_LOG names the stubs compiled
+ * without storing the cycle count (CCREG not in the stub's regmap) */
+static void lane_ccstale(int cc,int i,int line)
+{
+  static FILE *f; static int init;
+  if(!init) { const char *p=getenv("M64P_CCSTALE_LOG"); init=1; if(p) f=fopen(p,"w"); }
+  if(f&&cc<0) fprintf(f,"%08x %d line %d itype %d prev %d src %08x\n",start+i*4,i,line,itype[i],i>0?itype[i-1]:-1,source[i]);
+}
+#define LANE_CCSTALE(cc,i) lane_ccstale(cc,i,__LINE__)
 /**** Stubs ****/
 static void do_ccstub(int n)
 {
@@ -5011,7 +5020,7 @@ static void do_readstub(int n)
     emit_writeword(rth,((intptr_t)&g_dev.r4300.new_dynarec_hot_state.wdword)+4);
   }
 
-  int cc=get_reg(i_regmap,CCREG);
+  int cc=get_reg(i_regmap,CCREG); LANE_CCSTALE(cc,i);
   if(cc>=0) {
     emit_storereg(CCREG,cc);
   }
@@ -5117,7 +5126,7 @@ static void inline_readstub(int type, int i, u_int addr_const, char addr, struct
     emit_writeword(rth,((intptr_t)&g_dev.r4300.new_dynarec_hot_state.wdword)+4);
   }
 
-  int cc=get_reg(i_regs->regmap,CCREG);
+  int cc=get_reg(i_regs->regmap,CCREG); LANE_CCSTALE(cc,i);
   if(cc>=0) {
     emit_storereg(CCREG,cc);
   }
@@ -5235,7 +5244,7 @@ static void do_writestub(int n)
     emit_writeword(r?rth:rt,((intptr_t)&g_dev.r4300.new_dynarec_hot_state.wdword)+4);
   }
 
-  int cc=get_reg(i_regmap,CCREG);
+  int cc=get_reg(i_regmap,CCREG); LANE_CCSTALE(cc,i);
   if(cc>=0) {
     emit_storereg(CCREG,cc);
   }
@@ -5326,7 +5335,7 @@ static void inline_writestub(int type, int i, u_int addr_const, char addr, struc
     emit_writeword(target?rth:rt,((intptr_t)&g_dev.r4300.new_dynarec_hot_state.wdword)+4);
   }
 
-  int cc=get_reg(i_regs->regmap,CCREG);
+  int cc=get_reg(i_regs->regmap,CCREG); LANE_CCSTALE(cc,i);
   if(cc>=0) {
     emit_storereg(CCREG,cc);
   }
@@ -5384,7 +5393,7 @@ static void cop0_assemble(int i,struct regstat *i_regs)
       if(t>=0) {
         reglist&=~(1<<t);
 
-        int cc=get_reg(i_regs->regmap,CCREG);
+        int cc=get_reg(i_regs->regmap,CCREG); LANE_CCSTALE(cc,i);
         if(cc>=0) {
           emit_storereg(CCREG,cc);
         }
@@ -5416,7 +5425,7 @@ static void cop0_assemble(int i,struct regstat *i_regs)
 
     emit_writeword(s,(uintptr_t)&g_dev.r4300.new_dynarec_hot_state.rt);
 
-    int cc=get_reg(i_regs->regmap,CCREG);
+    int cc=get_reg(i_regs->regmap,CCREG); LANE_CCSTALE(cc,i);
     if(cc>=0) {
       emit_storereg(CCREG,cc);
     }
@@ -5477,7 +5486,7 @@ static void cop0_assemble(int i,struct regstat *i_regs)
     else if((source[i]&0x3f)==0x02) {  // TLBWI
       assert(!is_delayslot);
 
-      int cc=get_reg(i_regs->regmap,CCREG);
+      int cc=get_reg(i_regs->regmap,CCREG); LANE_CCSTALE(cc,i);
       if(cc>=0) {
         emit_storereg(CCREG,cc);
       }
@@ -5500,7 +5509,7 @@ static void cop0_assemble(int i,struct regstat *i_regs)
     else if((source[i]&0x3f)==0x06) { // TLBWR
       assert(!is_delayslot);
 
-      int cc=get_reg(i_regs->regmap,CCREG);
+      int cc=get_reg(i_regs->regmap,CCREG); LANE_CCSTALE(cc,i);
       if(cc>=0) {
         emit_storereg(CCREG,cc);
       }
