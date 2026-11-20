@@ -620,6 +620,7 @@ static int aot_from_image(int addr, int *ret)
  *   stubs) at k+1, MFC0, TLBWI, TLBWR and ERET at k, MTC0 at k (Status: k+1). After a write stub,
  *   and MTC0 of Count, Compare or Status, the code reloads the count the helper left; after any
  *   other helper it keeps its own, so a rebase the helper made (an event scheduled) is lost.
+ * - A COP1 instruction with COP1 unusable raises its exception with the count at k (do_cop1stub).
  * - Falling through to the next block adds the count without a check, as does handing back here.
  * Which instructions make up a block does not matter to this model, so the interpreter runs from
  * the missed address until a branch resolves, then hands its target to get_addr_ht, which finds
@@ -681,6 +682,26 @@ static int aot_is_store(enum r4300_opcode op)
   }
 }
 
+// the instructions the dynarec checks COP1 usable for (cop1_assemble, c1ls_assemble, fjump_assemble)
+static int aot_is_cop1(u_int iw)
+{
+  u_int op=iw>>26;
+  return op==0x11||op==0x31||op==0x35||op==0x39||op==0x3d;
+}
+
+/* do_cop1stub: the count at k, then fp_exception's cop1_unusable without its lookup (the caller
+ * leaves to pcaddr) */
+static void aot_cop1_unusable(u_int pc, int k, int ds)
+{
+  struct r4300_core *r4300=&g_dev.r4300;
+  struct new_dynarec_hot_state *st=&r4300->new_dynarec_hot_state;
+  st->cycle_count+=(int)CLOCK_DIVIDER*k;
+  r4300->delay_slot=ds;
+  st->pcaddr=pc;
+  st->cp0_regs[CP0_CAUSE_REG]=CP0_CAUSE_EXCCODE_CPU|CP0_CAUSE_CE1;
+  exception_general(r4300);
+}
+
 /* Run the non-branch instruction iw at pc, k instructions after the last branch, as the dynarec's
  * helpers would see it. Returns nonzero when it raised an exception (pcaddr is then the handler). */
 static int aot_interp_one(u_int pc, u_int iw, int k, int ds)
@@ -690,6 +711,10 @@ static int aot_interp_one(u_int pc, u_int iw, int k, int ds)
   const struct r4300_idec *idec=r4300_get_idec(iw);
   int cpo=(int)CLOCK_DIVIDER;
   aot_stats.interp_insns++;
+  if(aot_is_cop1(iw)&&!(st->cp0_regs[CP0_STATUS_REG]&CP0_STATUS_CU1)) {
+    aot_cop1_unusable(pc,k,ds);
+    return 1;
+  }
   switch(idec->opcode) {
   case R4300_OP_MTC0: { // MTC0_new, as cop0_assemble calls it
     u_int copr=(iw>>11)&0x1f;
@@ -794,8 +819,10 @@ void *aot_interp_run(void)
       continue;
     }
     aot_stats.interp_insns++;
-    if((idec->opcode==R4300_OP_BC1F||idec->opcode==R4300_OP_BC1T||idec->opcode==R4300_OP_BC1FL||idec->opcode==R4300_OP_BC1TL)
-       &&check_cop1_unusable(r4300)) { st->cycle_count+=cpo*k; AOT_INTERP_LEAVE(st->pcaddr); }
+    if(aot_is_cop1(iw)&&!(st->cp0_regs[CP0_STATUS_REG]&CP0_STATUS_CU1)) {
+      aot_cop1_unusable(pc,k,0);
+      AOT_INTERP_LEAVE(st->pcaddr);
+    }
     if(link) *link=(int64_t)(int32_t)(pc+8);
     u_int ds=aot_fetch(pc+4,&ok);
     AOT_CHECK(ok,"interp: the delay slot of %08x is unmapped",pc);
