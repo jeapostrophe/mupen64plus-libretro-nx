@@ -8,7 +8,8 @@
  *   from the image where the JIT would compile it (aot_install); a block the image lacks stops the
  *   process.
  * - "interp": "load", but a block the image lacks is run on the interpreter, charging cycles as
- *   the dynarec would have (aot_interp_run), and counted; the next block found is the image's again.
+ *   the dynarec would have (aot_interp_run), and counted, until a branch hands its target back to
+ *   the lookup (the image's block there, or another miss).
  *   This is the mode for a device, which has no JIT. In an RT_TRACE build `corrupt` charges that many
  *   cycles more at every interpreted branch (the red receipt for the cycle model).
  * And, in an RT_TRACE build only (the Mac's, whose tools make images; an iOS core carries load
@@ -591,7 +592,6 @@ static int aot_install(int addr)
   aot_stats.misses++;
   if(aot_mode==AOT_HYBRID) return -1; // the JIT compiles it
   if(aot_mode==AOT_INTERP) {
-    AOT_CHECK(!(addr&1),"miss at the delay-slot entry %08x: interp cannot enter a delay slot",(u_int)addr);
     aot_interp_missed((u_int)addr);
     return AOT_INTERPRET;
   }
@@ -610,30 +610,45 @@ static int aot_from_image(int addr, int *ret)
 }
 
 /**** interp: a miss run on the interpreter, timed as the dynarec times it ****/
-/* The dynarec's timing model (do_cc, the stubs, cop0_assemble), which aot_interp_run reproduces:
- * - Cycles accrue per instruction executed, count_per_op each, but reach the cycle count only at a
- *   branch: after its delay slot, the count gains (k+2)*count_per_op, k the instructions run since
- *   the last branch's delay slot (ccadj), and an interrupt is taken when the count is >= 0.
+/* The dynarec's timing model (do_cc, the stubs, cop0_assemble, pagespan_ds), which aot_interp_run
+ * reproduces. The dynarec keeps the cycle count in w20; here it is the hot state's cycle_count.
+ * - Cycles accrue per instruction executed, count_per_op each, but reach the count only at a
+ *   branch: after its delay slot the count gains (k+2)*count_per_op, k the instructions run since
+ *   the last branch's delay slot, and an interrupt is taken when the count is >= 0. (A branch to
+ *   a target t inside its block charges ccadj[t] less, and the code at t is short by that much
+ *   until its next branch, whose check adds it back: the same dynamic count as k counts.)
  * - A taken branch to itself whose delay slot is a NOP is an idle loop: the count becomes
  *   max(count,0) + 2*count_per_op and the interrupt is taken.
+ * - A jump in a delay slot is not run, and its branch charges one instruction more
+ *   (delayslot_alloc, which also sets stop_after_jal).
+ * - A branch whose delay slot is on an unmapped page raises the TLB refill there, BD set, with
+ *   the count at k+1 (pagespan_assemble, then dynamic_linker_ds). An entry at a delay slot (a
+ *   pagespan's, its branch's target in x19) charges one instruction, runs it, then checks the count
+ *   and goes to that target (pagespan_ds).
  * - A helper sees the count as it would be at its instruction: memory accesses (the read and write
  *   stubs) at k+1, MFC0, TLBWI, TLBWR and ERET at k, MTC0 at k (Status: k+1). After a write stub,
  *   and MTC0 of Count, Compare or Status, the code reloads the count the helper left; after any
  *   other helper it keeps its own, so a rebase the helper made (an event scheduled) is lost.
  * - A COP1 instruction with COP1 unusable raises its exception with the count at k (do_cop1stub).
  * - Falling through to the next block adds the count without a check, as does handing back here.
- * Which instructions make up a block does not matter to this model, so the interpreter runs from
- * the missed address until a branch resolves, then hands its target to get_addr_ht, which finds
- * the image's block there or comes back here. */
+ * With count_per_op_denom_pot 0 (the core option's default) this does not depend on how the
+ * instructions are cut into blocks, so the interpreter runs from the missed address until a branch
+ * resolves, then hands its target to get_addr_ht: the image's block there, or another miss. With it
+ * set, do_cc rounds ccadj[i] (the count from the segment's start in the block, not k), and not on
+ * an internal branch whose register state matches its target's (match_bt): reproducing that needs
+ * the dynarec's block and register allocation, so interp rounds k at every branch instead. */
 void aot_interp_entry(void);
-static u_int aot_interp_pc;   // where the latest miss left the interpreter to start
+static u_int aot_interp_pc;     // where the latest miss left the interpreter to start (odd: a delay slot)
+u_int aot_interp_btreg;         // aot_interp_entry's copy of x19 (HOST_BTREG): a delay-slot entry's target
 
 static void *aot_interpret_entry(int r)
 {
   return r==AOT_INTERPRET?(void*)aot_interp_entry:NULL;
 }
 
-// a distinct miss address is logged once (and to `log`, if one is set, for a later re-emit)
+/* Each distinct miss address is logged once. aot_stats.misses counts every lookup that fell to the
+ * interpreter (executions, not blocks), interp_addrs the distinct addresses. The set holds addr+1,
+ * so 0 marks an empty slot and a miss at vaddr 0 is still a key. */
 static u_int *aot_interp_seen; static u_int aot_interp_seen_cap;
 static void aot_interp_missed(u_int addr)
 {
@@ -648,9 +663,9 @@ static void aot_interp_missed(u_int addr)
     }
     free(aot_interp_seen); aot_interp_seen=t; aot_interp_seen_cap=cap;
   }
-  u_int h=(addr*2654435761u)&(aot_interp_seen_cap-1);
-  while(aot_interp_seen[h]) { if(aot_interp_seen[h]==addr) return; h=(h+1)&(aot_interp_seen_cap-1); }
-  aot_interp_seen[h]=addr;
+  u_int key=addr+1, h=(key*2654435761u)&(aot_interp_seen_cap-1);
+  while(aot_interp_seen[h]) { if(aot_interp_seen[h]==key) return; h=(h+1)&(aot_interp_seen_cap-1); }
+  aot_interp_seen[h]=key;
   aot_stats.interp_addrs++;
   fprintf(stderr,"new_dynarec AOT interp: miss at %08x, interpreted\n",addr);
 }
@@ -682,6 +697,23 @@ static int aot_is_store(enum r4300_opcode op)
   }
 }
 
+// what delayslot_alloc calls a jump in a delay slot (the dynarec's UJUMP..FJUMP and SYSCALL)
+static int aot_is_jump(enum r4300_opcode op)
+{
+  switch(op) {
+  case R4300_OP_J: case R4300_OP_JAL: case R4300_OP_JR: case R4300_OP_JALR:
+  case R4300_OP_BEQ: case R4300_OP_BEQL: case R4300_OP_BNE: case R4300_OP_BNEL:
+  case R4300_OP_BLEZ: case R4300_OP_BLEZL: case R4300_OP_BGTZ: case R4300_OP_BGTZL:
+  case R4300_OP_BLTZ: case R4300_OP_BLTZL: case R4300_OP_BGEZ: case R4300_OP_BGEZL:
+  case R4300_OP_BLTZAL: case R4300_OP_BLTZALL: case R4300_OP_BGEZAL: case R4300_OP_BGEZALL:
+  case R4300_OP_BC1F: case R4300_OP_BC1FL: case R4300_OP_BC1T: case R4300_OP_BC1TL:
+  case R4300_OP_SYSCALL:
+    return 1;
+  default:
+    return 0;
+  }
+}
+
 // the instructions the dynarec checks COP1 usable for (cop1_assemble, c1ls_assemble, fjump_assemble)
 static int aot_is_cop1(u_int iw)
 {
@@ -689,21 +721,9 @@ static int aot_is_cop1(u_int iw)
   return op==0x11||op==0x31||op==0x35||op==0x39||op==0x3d;
 }
 
-/* do_cop1stub: the count at k, then fp_exception's cop1_unusable without its lookup (the caller
- * leaves to pcaddr) */
-static void aot_cop1_unusable(u_int pc, int k, int ds)
-{
-  struct r4300_core *r4300=&g_dev.r4300;
-  struct new_dynarec_hot_state *st=&r4300->new_dynarec_hot_state;
-  st->cycle_count+=(int)CLOCK_DIVIDER*k;
-  r4300->delay_slot=ds;
-  st->pcaddr=pc;
-  st->cp0_regs[CP0_CAUSE_REG]=CP0_CAUSE_EXCCODE_CPU|CP0_CAUSE_CE1;
-  exception_general(r4300);
-}
-
 /* Run the non-branch instruction iw at pc, k instructions after the last branch, as the dynarec's
- * helpers would see it. Returns nonzero when it raised an exception (pcaddr is then the handler). */
+ * helpers would see it (COP1 usable is the caller's check). Returns nonzero when it raised an
+ * exception (pcaddr is then the handler). */
 static int aot_interp_one(u_int pc, u_int iw, int k, int ds)
 {
   struct r4300_core *r4300=&g_dev.r4300;
@@ -711,10 +731,6 @@ static int aot_interp_one(u_int pc, u_int iw, int k, int ds)
   const struct r4300_idec *idec=r4300_get_idec(iw);
   int cpo=(int)CLOCK_DIVIDER;
   aot_stats.interp_insns++;
-  if(aot_is_cop1(iw)&&!(st->cp0_regs[CP0_STATUS_REG]&CP0_STATUS_CU1)) {
-    aot_cop1_unusable(pc,k,ds);
-    return 1;
-  }
   switch(idec->opcode) {
   case R4300_OP_MTC0: { // MTC0_new, as cop0_assemble calls it
     u_int copr=(iw>>11)&0x1f;
@@ -753,6 +769,17 @@ static int aot_interp_one(u_int pc, u_int iw, int k, int ds)
   return st->pending_exception;
 }
 
+/* cc_interrupt with pcaddr `next`: returns where to go on, or 0 with *stop set */
+static u_int aot_interp_interrupt(u_int next, int *stop)
+{
+  struct new_dynarec_hot_state *st=&g_dev.r4300.new_dynarec_hot_state;
+  st->pcaddr=next;
+  st->pending_exception=0;
+  dynarec_gen_interrupt();
+  *stop=st->stop!=0;
+  return st->pending_exception?(u_int)st->pcaddr:next;
+}
+
 /* aot_interp_entry's (linkage_arm64.S): interpret from aot_interp_pc, the cycle count in the hot
  * state, until a branch resolves; return the host address to continue at (the stop flag set means
  * the dynarec stops instead). */
@@ -764,16 +791,40 @@ void *aot_interp_run(void)
   int64_t *regs=r4300_regs(r4300);
   int cpo=(int)CLOCK_DIVIDER;
   u_int pc=aot_interp_pc, next;
-  int k=0, ok;
+  int k=0, ok, stop;
   aot_stats.interp_runs++;
 #define AOT_INTERP_LEAVE(to) do { st->fake_pc=saved; return get_addr_ht(to); } while(0)
+#define AOT_INTERP_COP1(at,kk,dsflag) do { /* do_cop1stub, then fp_exception */ \
+    if(aot_is_cop1(iw)&&!(st->cp0_regs[CP0_STATUS_REG]&CP0_STATUS_CU1)) { \
+      st->cycle_count+=cpo*(kk); st->pcaddr=(at)|(dsflag); st->fake_pc=saved; return cop1_unusable(); } \
+  } while(0)
+  if(pc&1) { // pagespan_ds: the delay slot of a branch on the previous page, its target in x19
+    u_int bt=aot_interp_btreg, iw;
+    pc&=~1u;
+    st->cycle_count+=cpo;
+    iw=aot_fetch(pc,&ok);
+    if(!ok) { // unreachable (aot_install refuses an unmapped page first), raised as dynamic_linker_ds does
+      r4300->delay_slot=1;
+      TLB_refill_exception(r4300,pc,2);
+      AOT_INTERP_LEAVE(st->pcaddr);
+    }
+    AOT_INTERP_COP1(pc,0,0);
+    if(!aot_is_jump(r4300_get_idec(iw)->opcode)&&aot_interp_one(pc,iw,0,0)) AOT_INTERP_LEAVE(st->pcaddr);
+    if(st->cycle_count>=0) {
+      bt=aot_interp_interrupt(bt,&stop);
+      if(stop) { st->fake_pc=saved; return NULL; }
+    }
+    if(bt!=pc+4) AOT_INTERP_LEAVE(bt);
+    pc+=4; k=1; // on in the same block
+  }
   for(;;) {
     u_int iw=aot_fetch(pc,&ok);
     if(!ok) { st->cycle_count+=cpo*k; AOT_INTERP_LEAVE(pc); } // get_addr_ht raises the TLB miss
+    AOT_INTERP_COP1(pc,k,0);
     const struct r4300_idec *idec=r4300_get_idec(iw);
     int64_t rs=regs[(iw>>21)&0x1f], rt=regs[(iw>>16)&0x1f];
     u_int target=pc+4+((u_int)(int32_t)(int16_t)iw<<2);
-    int branch=1, take=0, likely=0, reg_target=0;
+    int take=0, likely=0, reg_target=0;
     int64_t *link=NULL;
     switch(idec->opcode) {
     case R4300_OP_J: take=1; target=((pc+4)&0xf0000000)|((iw&0x3ffffff)<<2); break;
@@ -811,43 +862,37 @@ void *aot_interp_run(void)
       st->pcaddr=pc;
       st->fake_pc=saved;
       return SYSCALL_new();
-    default: branch=0; break;
-    }
-    if(!branch) {
+    default:
       if(aot_interp_one(pc,iw,k,0)) AOT_INTERP_LEAVE(st->pcaddr);
       pc+=4; k++;
       continue;
     }
     aot_stats.interp_insns++;
-    if(aot_is_cop1(iw)&&!(st->cp0_regs[CP0_STATUS_REG]&CP0_STATUS_CU1)) {
-      aot_cop1_unusable(pc,k,0);
-      AOT_INTERP_LEAVE(st->pcaddr);
-    }
     if(link) *link=(int64_t)(int32_t)(pc+8);
     u_int ds=aot_fetch(pc+4,&ok);
-    AOT_CHECK(ok,"interp: the delay slot of %08x is unmapped",pc);
+    if(!ok) { // pagespan_assemble's jump to the delay-slot entry, which dynamic_linker_ds refuses
+      st->cycle_count+=cpo*(k+1);
+      r4300->delay_slot=1;
+      TLB_refill_exception(r4300,pc+4,2);
+      AOT_INTERP_LEAVE(st->pcaddr);
+    }
+    int extra=0;
     if(!likely||take) {
-      const struct r4300_idec *dsdec=r4300_get_idec(ds);
-      switch(dsdec->opcode) {
-      case R4300_OP_J: case R4300_OP_JAL: case R4300_OP_JR: case R4300_OP_JALR:
-      case R4300_OP_BEQ: case R4300_OP_BEQL: case R4300_OP_BNE: case R4300_OP_BNEL:
-      case R4300_OP_BLEZ: case R4300_OP_BLEZL: case R4300_OP_BGTZ: case R4300_OP_BGTZL:
-      case R4300_OP_BLTZ: case R4300_OP_BLTZL: case R4300_OP_BGEZ: case R4300_OP_BGEZL:
-      case R4300_OP_BLTZAL: case R4300_OP_BLTZALL: case R4300_OP_BGEZAL: case R4300_OP_BGEZALL:
-      case R4300_OP_BC1F: case R4300_OP_BC1FL: case R4300_OP_BC1T: case R4300_OP_BC1TL:
-      case R4300_OP_ERET: case R4300_OP_SYSCALL:
-        AOT_CHECK(0,"interp: %08x's delay slot holds a jump (%08x), which the dynarec times otherwise",pc,ds);
-      default: break;
+      if(aot_is_jump(r4300_get_idec(ds)->opcode)) { // delayslot_alloc: not run, one instruction more
+        stop_after_jal=1;
+        extra=1;
+      } else {
+        { u_int iw=ds; AOT_INTERP_COP1(pc+4,k+1,1); }
+        if(aot_interp_one(pc+4,ds,k+1,1)) AOT_INTERP_LEAVE(st->pcaddr);
       }
-      if(aot_interp_one(pc+4,ds,k+1,1)) AOT_INTERP_LEAVE(st->pcaddr);
     }
     next=take?target:pc+8;
     if(take&&!reg_target&&target==pc&&ds==0) { // do_cc's idle loop
       if(st->cycle_count<0) st->cycle_count=0;
       st->cycle_count+=cpo*2;
     } else {
-      int count=k;
-      if(r4300->cp0.count_per_op_denom_pot) { // do_cc's rounding
+      int count=k+extra;
+      if(r4300->cp0.count_per_op_denom_pot) { // do_cc's rounding (of k: see the model above)
         count+=(1<<r4300->cp0.count_per_op_denom_pot)-1;
         count>>=r4300->cp0.count_per_op_denom_pot;
       }
@@ -855,13 +900,11 @@ void *aot_interp_run(void)
     }
     st->cycle_count+=(int)aot_interp_skew;
     if(st->cycle_count>=0) { // cc_interrupt, from do_ccstub with pcaddr the branch's way
-      st->pcaddr=next;
-      st->pending_exception=0;
-      dynarec_gen_interrupt();
-      if(st->stop) { st->fake_pc=saved; return NULL; }
-      if(st->pending_exception) next=st->pcaddr;
+      next=aot_interp_interrupt(next,&stop);
+      if(stop) { st->fake_pc=saved; return NULL; }
     }
     AOT_INTERP_LEAVE(next);
   }
+#undef AOT_INTERP_COP1
 #undef AOT_INTERP_LEAVE
 }

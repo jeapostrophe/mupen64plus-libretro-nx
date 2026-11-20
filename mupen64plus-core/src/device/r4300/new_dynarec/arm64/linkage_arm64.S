@@ -59,6 +59,7 @@
 #define dynamic_linker_ds    _dynamic_linker_ds
 #define new_recompile_block  _new_recompile_block
 #define aot_interp_run       _aot_interp_run
+#define aot_interp_btreg     _aot_interp_btreg
 
 #else /* ELF */
 
@@ -241,10 +242,13 @@ GLOBAL_FUNCTION(verify_code_aot):
     br     x0
 
 /* retro-trainer HH-33: M64P_AOT=interp's miss. get_addr hands this out for a block the image
-   lacks; aot_interp_run interprets from there (the cycle count passed through the hot state) and
+   lacks; aot_interp_run interprets from there (the cycle count passed through the hot state, x19
+   for a delay-slot entry) and
    returns the next block's host address, or stops the dynarec as cc_interrupt would. */
 GLOBAL_FUNCTION(aot_interp_entry):
     str    w20, [x29, #fp_cycle_count]
+    adrp   x1, PAGE(aot_interp_btreg)
+    str    w19, [x1, PAGEOFF(aot_interp_btreg)] /* a delay-slot entry's branch target (HOST_BTREG) */
     bl     aot_interp_run
     ldr    w20, [x29, #fp_cycle_count]
     ldr    w2, [x29, #fp_stop]
