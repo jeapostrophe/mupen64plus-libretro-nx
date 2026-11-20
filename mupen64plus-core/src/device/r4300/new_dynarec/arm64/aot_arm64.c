@@ -899,6 +899,23 @@ void *aot_interp_run(void)
       st->cycle_count+=cpo*(count+2);
     }
     st->cycle_count+=(int)aot_interp_skew;
+    { /* LANE-ONLY DIAGNOSTIC (lane hh33c): M64P_LANE_ARM3=1 checks a taken backward branch to a
+         mid-segment loop head against k+2+ccadj[head] (the review's reading of do_cc's third arm),
+         to show the traces can tell that model from the JIT */
+      static int init, on; static u_int lh_t; static int lh_adj;
+      if(!init) { init=1; on=getenv("M64P_LANE_ARM3")!=NULL; }
+      if(on&&take&&!reg_target&&target<pc) {
+        int adj=0;
+        if(aot_interp_pc<target) { lh_t=target; lh_adj=(int)((target-aot_interp_pc)>>2); adj=lh_adj; }
+        else if(target==lh_t&&aot_interp_pc==target) adj=lh_adj;
+        if(adj&&st->cycle_count<0&&st->cycle_count+cpo*adj>=0) {
+          st->cycle_count+=cpo*adj;
+          next=aot_interp_interrupt(next,&stop);
+          st->cycle_count-=cpo*adj;
+          if(stop) { st->fake_pc=saved; return NULL; }
+        }
+      }
+    }
     if(st->cycle_count>=0) { // cc_interrupt, from do_ccstub with pcaddr the branch's way
       next=aot_interp_interrupt(next,&stop);
       if(stop) { st->fake_pc=saved; return NULL; }
