@@ -2077,7 +2077,7 @@ void retro_run (void)
 
     {
        /* LANE-ONLY DIAGNOSTIC (retro-trainer lane hh33b, never pushed): M64P_RDRAM_DUMP=N,N,...
-          writes RDRAM after the Nth retro_run to $M64P_RDRAM_DUMP_DIR/f<N>.ram */
+          writes RDRAM after the Nth retro_run to $M64P_RDRAM_DUMP_DIR/f<N>.ram (default: the working directory) */
        static unsigned long runs;
        const char *at = getenv("M64P_RDRAM_DUMP");
        runs++;
@@ -2088,7 +2088,8 @@ void retro_run (void)
           snprintf(list, sizeof list, ",%s,", at);
           if (strstr(list, key)) {
              char path[4096];
-             snprintf(path, sizeof path, "%s/f%lu.ram", getenv("M64P_RDRAM_DUMP_DIR"), runs);
+             const char *dir = getenv("M64P_RDRAM_DUMP_DIR");
+             snprintf(path, sizeof path, "%s/f%lu.ram", dir ? dir : ".", runs);
              FILE *f = fopen(path, "wb");
              if (f) { fwrite(g_dev.rdram.dram, 1, g_dev.rdram.dram_size, f); fclose(f); }
           }
