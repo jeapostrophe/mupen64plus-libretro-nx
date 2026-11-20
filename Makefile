@@ -732,6 +732,10 @@ $(AWK_DEST_DIR)/asm_defines_nasm.h: $(ASM_DEFINES_OBJ)
 %.o: %.c
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
+# new_dynarec.c #includes its arch's assem_*.c and arm64/aot_arm64.c, which no dependency file
+# names, so an edit to one of them rebuilds it (retro-trainer HH-33)
+$(CORE_DIR)/src/device/r4300/new_dynarec/new_dynarec.o: $(wildcard $(CORE_DIR)/src/device/r4300/new_dynarec/*/*.c $(CORE_DIR)/src/device/r4300/new_dynarec/*/*.h)
+
 $(RSPDIR_PARALLEL)/lightning/lib/lightning.o: $(RSPDIR_PARALLEL)/lightning/lib/lightning.c
 	$(CC) $(CPPFLAGS) $(CFLAGS) -DHAVE_MMAP=1 -c $< -o $@
 
