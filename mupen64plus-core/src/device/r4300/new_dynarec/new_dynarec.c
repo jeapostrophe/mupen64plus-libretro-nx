@@ -12109,4 +12109,5 @@ void new_dynarec_aot_configure(const char *mode, const char *image, const char *
   (void)mode; (void)image; (void)log; (void)corrupt; (void)core_uuid;
 }
 int new_dynarec_aot_admits(void) { return 1; }
+void new_dynarec_aot_set_report(void (*report)(int admitted, const char *detail)) { (void)report; }
 #endif

@@ -107,9 +107,13 @@ void new_dynarec_cleanup(void);
  * emitting core's own. A no-op on the other dynarecs. */
 void new_dynarec_aot_configure(const char *mode, const char *image, const char *log, unsigned int corrupt,
                                const char *core_uuid);
-/* Whether the dynarec may start (r4300_execute asks first): a load whose image this core refuses,
+/* Whether the dynarec may start (run_r4300 asks first): a load whose image this core refuses,
  * or a build that cannot JIT with no image configured, answers 0 and says why on stderr, and the
  * cached interpreter runs instead. 1 on the other dynarecs. */
 int new_dynarec_aot_admits(void);
+/* Who hears a load's outcome: new_dynarec_aot_admits calls report once per load or hybrid run with
+ * whether the image was admitted and the line saying so (the image and its blocks, or why it was
+ * refused). libretro.c hands it to the frontend. A no-op on the other dynarecs. */
+void new_dynarec_aot_set_report(void (*report)(int admitted, const char *detail));
 
 #endif /* M64P_DEVICE_R4300_NEW_DYNAREC_H */
