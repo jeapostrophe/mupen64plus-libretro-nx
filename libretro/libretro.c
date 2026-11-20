@@ -742,6 +742,10 @@ void retro_deinit(void)
 
     CoreShutdown();
     deinit_audio_libretro();
+#ifdef NEW_DYNAREC
+    /* retro-trainer HH-36: the AOT image the last game held, released with the core */
+    new_dynarec_aot_configure(NULL, NULL, NULL, 0, NULL);
+#endif
 
     if (perf_cb.perf_log)
         perf_cb.perf_log();
@@ -1877,6 +1881,33 @@ static bool retro_init_vulkan(void)
 #endif
 }
 
+#ifdef NEW_DYNAREC
+/* retro-trainer PLAN-handheld HH-36: whether the core admitted the AOT image the frontend named
+   (new_dynarec_aot_set_report), told to the frontend through this private command, which only
+   retro-trainer answers: its argument is a `struct rt_aot_outcome`, valid for the call. The core
+   decides at the dynarec's start, on the emulation thread or coroutine; the frontend hears it from
+   retro_run, on its own thread, once per decision. */
+#define RT_ENVIRONMENT_AOT_OUTCOME (RETRO_ENVIRONMENT_PRIVATE | 0x3601)
+struct rt_aot_outcome { int admitted; const char *detail; };
+static char rt_aot_detail[512];
+static int rt_aot_admitted, rt_aot_pending;
+
+static void rt_aot_report(int admitted, const char *detail)
+{
+   strlcpy(rt_aot_detail, detail, sizeof rt_aot_detail);
+   rt_aot_admitted = admitted;
+   __atomic_store_n(&rt_aot_pending, 1, __ATOMIC_RELEASE);
+}
+
+static void rt_aot_deliver(void)
+{
+   if (!__atomic_exchange_n(&rt_aot_pending, 0, __ATOMIC_ACQUIRE))
+      return;
+   struct rt_aot_outcome outcome = { rt_aot_admitted, rt_aot_detail };
+   environ_cb(RT_ENVIRONMENT_AOT_OUTCOME, &outcome);
+}
+#endif
+
 bool retro_load_game(const struct retro_game_info *game)
 {
     char* gamePath;
@@ -1953,11 +1984,23 @@ bool retro_load_game(const struct retro_game_info *game)
 
 #ifdef NEW_DYNAREC
     {
-       /* retro-trainer PLAN-handheld HH-33: the dynarec's AOT form (new_dynarec_aot_configure),
-          read from the environment here and nowhere else, for every game this process loads */
+       /* retro-trainer PLAN-handheld HH-33/HH-36: the dynarec's AOT form (new_dynarec_aot_configure),
+          chosen here and nowhere else, for each game this process loads: the M64P_AOT* environment
+          when M64P_AOT is set (the Mac's tooling), else the image the frontend names in its
+          `rt_aot_image` option (retro-trainer's, from the `aot` entries of cores.lock), run in
+          "interp": a block the image lacks runs on the interpreter (PLAN-handheld HH-33) */
        const char *corrupt = getenv("M64P_AOT_CORRUPT");
-       new_dynarec_aot_configure(getenv("M64P_AOT"), getenv("M64P_AOT_IMAGE"), getenv("M64P_AOT_LOG"),
-          corrupt ? (unsigned int)strtoul(corrupt, NULL, 16) : 0);
+       new_dynarec_aot_set_report(rt_aot_report);
+       const char *mode = getenv("M64P_AOT"), *image = getenv("M64P_AOT_IMAGE");
+       struct retro_variable aot_var = { "rt_aot_image", NULL };
+       if (!(mode && *mode) && environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &aot_var) && aot_var.value && *aot_var.value)
+       {
+          mode = "interp";
+          image = aot_var.value;
+          corrupt = NULL; /* the tooling's red receipts are the environment's alone */
+       }
+       new_dynarec_aot_configure(mode, image, getenv("M64P_AOT_LOG"),
+          corrupt ? (unsigned int)strtoul(corrupt, NULL, 16) : 0, getenv("M64P_AOT_CORE_UUID"));
     }
 #endif
 
@@ -2074,6 +2117,9 @@ void retro_run (void)
     }
 
     co_switch(game_thread);
+#ifdef NEW_DYNAREC
+    rt_aot_deliver();
+#endif
 
     if(current_rdp_type == RDP_PLUGIN_GLIDEN64)
     {

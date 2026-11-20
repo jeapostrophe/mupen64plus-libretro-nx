@@ -119,149 +119,50 @@ static const uintptr_t jump_vaddr_reg[32] = {
   (intptr_t)breakpoint,
   (intptr_t)breakpoint};
 
-static uintptr_t jump_table_symbols[] = {
-  (intptr_t)NULL /*TLBR*/,
-  (intptr_t)NULL /*TLBP*/,
-  (intptr_t)NULL /*MULT*/,
-  (intptr_t)NULL /*MULTU*/,
-  (intptr_t)NULL /*DIV*/,
-  (intptr_t)NULL /*DIVU*/,
-  (intptr_t)NULL /*DMULT*/,
-  (intptr_t)NULL /*DMULTU*/,
-  (intptr_t)NULL /*DDIV*/,
-  (intptr_t)NULL /*DDIVU*/,
-  (intptr_t)invalidate_addr,
-  (intptr_t)dyna_linker,
-  (intptr_t)dyna_linker_ds,
-  (intptr_t)verify_code,
-  (intptr_t)cc_interrupt,
-  (intptr_t)fp_exception,
-  (intptr_t)jump_syscall,
-  (intptr_t)jump_eret,
-  (intptr_t)do_interrupt,
-  (intptr_t)TLBWI_new,
-  (intptr_t)TLBWR_new,
-  (intptr_t)MFC0_new,
-  (intptr_t)MTC0_new,
-  (intptr_t)jump_vaddr_x0,
-  (intptr_t)jump_vaddr_x1,
-  (intptr_t)jump_vaddr_x2,
-  (intptr_t)jump_vaddr_x3,
-  (intptr_t)jump_vaddr_x4,
-  (intptr_t)jump_vaddr_x5,
-  (intptr_t)jump_vaddr_x6,
-  (intptr_t)jump_vaddr_x7,
-  (intptr_t)jump_vaddr_x8,
-  (intptr_t)jump_vaddr_x9,
-  (intptr_t)jump_vaddr_x10,
-  (intptr_t)jump_vaddr_x11,
-  (intptr_t)jump_vaddr_x12,
-  (intptr_t)jump_vaddr_x13,
-  (intptr_t)jump_vaddr_x14,
-  (intptr_t)jump_vaddr_x15,
-  (intptr_t)jump_vaddr_x16,
-  (intptr_t)jump_vaddr_x17,
-  (intptr_t)jump_vaddr_x19,
-  (intptr_t)jump_vaddr_x21,
-  (intptr_t)jump_vaddr_x22,
-  (intptr_t)jump_vaddr_x23,
-  (intptr_t)jump_vaddr_x24,
-  (intptr_t)jump_vaddr_x25,
-  (intptr_t)jump_vaddr_x26,
-  (intptr_t)jump_vaddr_x27,
-  (intptr_t)jump_vaddr_x28,
-  (intptr_t)cvt_s_w,
-  (intptr_t)cvt_d_w,
-  (intptr_t)cvt_s_l,
-  (intptr_t)cvt_d_l,
-  (intptr_t)cvt_w_s,
-  (intptr_t)cvt_w_d,
-  (intptr_t)cvt_l_s,
-  (intptr_t)cvt_l_d,
-  (intptr_t)cvt_d_s,
-  (intptr_t)cvt_s_d,
-  (intptr_t)round_l_s,
-  (intptr_t)round_w_s,
-  (intptr_t)trunc_l_s,
-  (intptr_t)trunc_w_s,
-  (intptr_t)ceil_l_s,
-  (intptr_t)ceil_w_s,
-  (intptr_t)floor_l_s,
-  (intptr_t)floor_w_s,
-  (intptr_t)round_l_d,
-  (intptr_t)round_w_d,
-  (intptr_t)trunc_l_d,
-  (intptr_t)trunc_w_d,
-  (intptr_t)ceil_l_d,
-  (intptr_t)ceil_w_d,
-  (intptr_t)floor_l_d,
-  (intptr_t)floor_w_d,
-  (intptr_t)c_f_s,
-  (intptr_t)c_un_s,
-  (intptr_t)c_eq_s,
-  (intptr_t)c_ueq_s,
-  (intptr_t)c_olt_s,
-  (intptr_t)c_ult_s,
-  (intptr_t)c_ole_s,
-  (intptr_t)c_ule_s,
-  (intptr_t)c_sf_s,
-  (intptr_t)c_ngle_s,
-  (intptr_t)c_seq_s,
-  (intptr_t)c_ngl_s,
-  (intptr_t)c_lt_s,
-  (intptr_t)c_nge_s,
-  (intptr_t)c_le_s,
-  (intptr_t)c_ngt_s,
-  (intptr_t)c_f_d,
-  (intptr_t)c_un_d,
-  (intptr_t)c_eq_d,
-  (intptr_t)c_ueq_d,
-  (intptr_t)c_olt_d,
-  (intptr_t)c_ult_d,
-  (intptr_t)c_ole_d,
-  (intptr_t)c_ule_d,
-  (intptr_t)c_sf_d,
-  (intptr_t)c_ngle_d,
-  (intptr_t)c_seq_d,
-  (intptr_t)c_ngl_d,
-  (intptr_t)c_lt_d,
-  (intptr_t)c_nge_d,
-  (intptr_t)c_le_d,
-  (intptr_t)c_ngt_d,
-  (intptr_t)add_s,
-  (intptr_t)sub_s,
-  (intptr_t)mul_s,
-  (intptr_t)div_s,
-  (intptr_t)sqrt_s,
-  (intptr_t)abs_s,
-  (intptr_t)mov_s,
-  (intptr_t)neg_s,
-  (intptr_t)add_d,
-  (intptr_t)sub_d,
-  (intptr_t)mul_d,
-  (intptr_t)div_d,
-  (intptr_t)sqrt_d,
-  (intptr_t)abs_d,
-  (intptr_t)mov_d,
-  (intptr_t)neg_d,
-  (intptr_t)read_byte_new,
-  (intptr_t)read_hword_new,
-  (intptr_t)read_word_new,
-  (intptr_t)read_dword_new,
-  (intptr_t)write_byte_new,
-  (intptr_t)write_hword_new,
-  (intptr_t)write_word_new,
-  (intptr_t)write_dword_new,
-  (intptr_t)LWL_new,
-  (intptr_t)LWR_new,
-  (intptr_t)LDL_new,
-  (intptr_t)LDR_new,
-  (intptr_t)SWL_new,
-  (intptr_t)SWR_new,
-  (intptr_t)SDL_new,
-  (intptr_t)SDR_new,
-  (intptr_t)breakpoint
-};
+/* retro-trainer PLAN-handheld HH-36: the helpers generated code calls, by name and in table order:
+ * the one list jump_table_symbols, arch_init's fill of its first ten and the AOT image's import
+ * names (aot_import_names, whose hash an image is refused on) are all made from. L(f) is filled
+ * in by arch_init, S(f) is static. */
+#define AOT_JUMP_TABLE(L, S) \
+  L(cached_interp_TLBR) L(cached_interp_TLBP) L(cached_interp_MULT) L(cached_interp_MULTU) \
+  L(cached_interp_DIV) L(cached_interp_DIVU) L(cached_interp_DMULT) L(cached_interp_DMULTU) \
+  L(cached_interp_DDIV) L(cached_interp_DDIVU) S(invalidate_addr) S(dyna_linker) \
+  S(dyna_linker_ds) S(verify_code) S(cc_interrupt) S(fp_exception) \
+  S(jump_syscall) S(jump_eret) S(do_interrupt) S(TLBWI_new) \
+  S(TLBWR_new) S(MFC0_new) S(MTC0_new) S(jump_vaddr_x0) \
+  S(jump_vaddr_x1) S(jump_vaddr_x2) S(jump_vaddr_x3) S(jump_vaddr_x4) \
+  S(jump_vaddr_x5) S(jump_vaddr_x6) S(jump_vaddr_x7) S(jump_vaddr_x8) \
+  S(jump_vaddr_x9) S(jump_vaddr_x10) S(jump_vaddr_x11) S(jump_vaddr_x12) \
+  S(jump_vaddr_x13) S(jump_vaddr_x14) S(jump_vaddr_x15) S(jump_vaddr_x16) \
+  S(jump_vaddr_x17) S(jump_vaddr_x19) S(jump_vaddr_x21) S(jump_vaddr_x22) \
+  S(jump_vaddr_x23) S(jump_vaddr_x24) S(jump_vaddr_x25) S(jump_vaddr_x26) \
+  S(jump_vaddr_x27) S(jump_vaddr_x28) S(cvt_s_w) S(cvt_d_w) \
+  S(cvt_s_l) S(cvt_d_l) S(cvt_w_s) S(cvt_w_d) \
+  S(cvt_l_s) S(cvt_l_d) S(cvt_d_s) S(cvt_s_d) \
+  S(round_l_s) S(round_w_s) S(trunc_l_s) S(trunc_w_s) \
+  S(ceil_l_s) S(ceil_w_s) S(floor_l_s) S(floor_w_s) \
+  S(round_l_d) S(round_w_d) S(trunc_l_d) S(trunc_w_d) \
+  S(ceil_l_d) S(ceil_w_d) S(floor_l_d) S(floor_w_d) \
+  S(c_f_s) S(c_un_s) S(c_eq_s) S(c_ueq_s) \
+  S(c_olt_s) S(c_ult_s) S(c_ole_s) S(c_ule_s) \
+  S(c_sf_s) S(c_ngle_s) S(c_seq_s) S(c_ngl_s) \
+  S(c_lt_s) S(c_nge_s) S(c_le_s) S(c_ngt_s) \
+  S(c_f_d) S(c_un_d) S(c_eq_d) S(c_ueq_d) \
+  S(c_olt_d) S(c_ult_d) S(c_ole_d) S(c_ule_d) \
+  S(c_sf_d) S(c_ngle_d) S(c_seq_d) S(c_ngl_d) \
+  S(c_lt_d) S(c_nge_d) S(c_le_d) S(c_ngt_d) \
+  S(add_s) S(sub_s) S(mul_s) S(div_s) \
+  S(sqrt_s) S(abs_s) S(mov_s) S(neg_s) \
+  S(add_d) S(sub_d) S(mul_d) S(div_d) \
+  S(sqrt_d) S(abs_d) S(mov_d) S(neg_d) \
+  S(read_byte_new) S(read_hword_new) S(read_word_new) S(read_dword_new) \
+  S(write_byte_new) S(write_hword_new) S(write_word_new) S(write_dword_new) \
+  S(LWL_new) S(LWR_new) S(LDL_new) S(LDR_new) \
+  S(SWL_new) S(SWR_new) S(SDL_new) S(SDR_new) \
+  S(breakpoint)
+#define JT_NULL(f) (intptr_t)NULL,
+#define JT_ADDR(f) (intptr_t)f,
+static uintptr_t jump_table_symbols[] = { AOT_JUMP_TABLE(JT_NULL, JT_ADDR) };
 
 #if defined(__APPLE__)
 #include <libkern/OSCacheControl.h>
@@ -4649,16 +4550,14 @@ static void arch_init(void) {
   g_dev.r4300.new_dynarec_hot_state.ram_offset=((intptr_t)g_dev.rdram.dram-(intptr_t)0x80000000)>>2;
   #endif
 
-  jump_table_symbols[0] = (intptr_t)cached_interp_TLBR;
-  jump_table_symbols[1] = (intptr_t)cached_interp_TLBP;
-  jump_table_symbols[2] = (intptr_t)cached_interp_MULT;
-  jump_table_symbols[3] = (intptr_t)cached_interp_MULTU;
-  jump_table_symbols[4] = (intptr_t)cached_interp_DIV;
-  jump_table_symbols[5] = (intptr_t)cached_interp_DIVU;
-  jump_table_symbols[6] = (intptr_t)cached_interp_DMULT;
-  jump_table_symbols[7] = (intptr_t)cached_interp_DMULTU;
-  jump_table_symbols[8] = (intptr_t)cached_interp_DDIV;
-  jump_table_symbols[9] = (intptr_t)cached_interp_DDIVU;
+  {
+    size_t n=0;
+#define JT_FILL(f) jump_table_symbols[n++]=(intptr_t)f;
+#define JT_SKIP(f) n++;
+    AOT_JUMP_TABLE(JT_FILL, JT_SKIP)
+#undef JT_FILL
+#undef JT_SKIP
+  }
 
   // retro-trainer HH-33: aot_imports, the same helpers by index
   AOT_CHECK(AOT_IMPORT_COUNT<=sizeof(g_dev.r4300.new_dynarec_hot_state.aot_imports)/sizeof(uintptr_t),

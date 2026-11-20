@@ -456,16 +456,19 @@ else ifneq (,$(findstring ios,$(platform)))
 		HAVE_PARALLEL_RDP = 1
 		HAVE_THR_AL = 1
 		LLE = 1
-		WITH_DYNAREC=
+		# retro-trainer PLAN-handheld HH-36: the arm64 dynarec, which on iOS runs only from an AOT
+		# image (new_dynarec_aot_admits); with none, the cached interpreter runs as before
+		WITH_DYNAREC=aarch64
 		GLES=1
 		GLES3=1
 		FORCE_GLES3=1
 		EGL := 0
 		HAVE_PARALLEL_RDP = 1
 		PLATCFLAGS += -DHAVE_POSIX_MEMALIGN -DIOS -DOS_IOS
-		PLATCFLAGS += -Ofast -ffast-math -funsafe-math-optimizations -DNO_ASM
-		COREFLAGS  += -Ofast -ffast-math -funsafe-math-optimizations -DNO_ASM
-		CPUFLAGS   += -Ofast -ffast-math -funsafe-math-optimizations -DNO_ASM
+		# no -DNO_ASM: it compiles out the dynarec arm of generic_jump_to (as on osx arm64)
+		PLATCFLAGS += -Ofast -ffast-math -funsafe-math-optimizations
+		COREFLAGS  += -Ofast -ffast-math -funsafe-math-optimizations
+		CPUFLAGS   += -Ofast -ffast-math -funsafe-math-optimizations
 		HAVE_NEON=1
 		CC         += -miphoneos-version-min=8.0
 		CC_AS      += -miphoneos-version-min=8.0

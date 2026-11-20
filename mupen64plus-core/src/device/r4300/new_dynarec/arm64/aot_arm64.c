@@ -2,11 +2,15 @@
  * this file at its end, on the arm64 dynarec only, so it shares that file's statics; the shared code
  * reaches it through the aot_* hooks declared at that file's top.
  *
- * new_dynarec_aot_configure (new_dynarec.h; libretro.c calls it, for now with the M64P_AOT*
- * environment) chooses a mode, which takes effect at the next new_dynarec_init:
+ * new_dynarec_aot_configure (new_dynarec.h; libretro.c calls it, with the frontend's `rt_aot_image`
+ * option or the M64P_AOT* environment) chooses a mode, which takes effect at the next
+ * new_dynarec_init:
  * - "load": runs from the image dylib `image`: no code cache is mapped, and a block is installed
  *   from the image where the JIT would compile it (aot_install); a block the image lacks stops the
- *   process.
+ *   process. new_dynarec_aot_admits, which run_r4300 asks before the dynarec starts, opens the
+ *   image and refuses one made for another core or another ROM (aot_check_header): the cached
+ *   interpreter runs the game instead. Either way it reports the outcome
+ *   (new_dynarec_aot_set_report).
  * - "interp": "load", but a block the image lacks is run on the interpreter, charging cycles as
  *   the dynarec would have (aot_interp_run), and counted, until a branch hands its target back to
  *   the lookup (the image's block there, or another miss).
@@ -23,10 +27,21 @@
  *   wrongly on purpose (aot_emit_all).
  * - "hybrid": "shape" with the image of "load" installed first, a miss compiled by the JIT and
  *   counted (and logged to `log`): a measurement of an image on a run it was not made from.
- * The image format and its checks are aot_image_header's. */
+ * The image format and its checks are aot_image_header's.
+ *
+ * A build that cannot map executable memory (iOS: AOT_CAN_JIT 0) runs the dynarec from an image
+ * only; asked for the stock dynarec it runs the cached interpreter (new_dynarec_aot_admits). */
 #include <dlfcn.h>
 #include "device/r4300/idec.h"
 #include <unistd.h>
+#ifdef __APPLE__
+#include <mach-o/loader.h>
+#endif
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+#define AOT_CAN_JIT 0
+#else
+#define AOT_CAN_JIT 1
+#endif
 #if defined(RT_TRACE) && TARGET_OS_OSX // the iOS SDK has neither libproc.h nor mach_vm.h
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
@@ -38,21 +53,42 @@
 #define AOT_FLAG_TLB 1
 #define AOT_FLAG_STOP_AFTER_JAL 2
 #define AOT_FLAG_SETS_STOP_AFTER_JAL 4 // the compile itself set stop_after_jal (junk, a jump in a delay slot)
+#define AOT_FLAGS_KNOWN (AOT_FLAG_TLB|AOT_FLAG_STOP_AFTER_JAL|AOT_FLAG_SETS_STOP_AFTER_JAL)
 
-/* The image's meta file, words little-endian: this header, then per block
+/* **The image format: this is its one home** (retro-trainer's cores/README.md, "AOT images", says
+ * how an image is made, keyed and shipped, and cites this). The image's meta, little-endian, is
+ * this header, then per block (u_int words)
  *   addr, slen, code_off, code_len, nentries, flags (AOT_FLAG_*), words[slen+1],
- *   entries[nentries] of (vaddr, reg32, dirty_off, clean_off, ht_replace).
- * The fields hot_state_size..count_per_op_denom_pot are the fingerprint a load refuses a
- * mismatch of: the hot state's layout the code addresses off FP, the import table's length, and
- * the timing constants the code bakes in. The core's own build (which orders aot_imports) is
- * not yet in it. */
+ *   entries[nentries] of (vaddr, reg32, dirty_off, clean_off, ht_replace),
+ * and its code is the blocks' bytes, at code_off within the code. A load refuses an image unless
+ * each checked field is this core's (aot_check_header, which names the first that differs, with
+ * both values): */
 struct aot_image_header {
-  u_int magic, version;
-  u_int hot_state_size, fp_imports, fp_mmap, import_count, count_per_op, count_per_op_denom_pot;
-  u_int nblocks, code_size;
+  u_int magic;         /* AOT_MAGIC */
+  u_int version;       /* AOT_VERSION, which fixes everything else here, the header's size too */
+  u_int import_count;  /* the helpers the code calls through aot_imports[n] */
+  u_int nblocks;       /* the blocks in the meta after this header */
+  u_char core_uuid[16];/* the LC_UUID of the core build that may load it (emit writes the one it
+                          is told, M64P_AOT_CORE_UUID, or its own) */
+  u_char emit_uuid[16];/* the LC_UUID of the build that emitted it: not checked here; retro-trainer's
+                          `cores.sh aot pin` requires it to be the Mac build its lock pins */
+  u_char rom_md5[16];  /* the game's ROM, as the core hashed it (ROM_SETTINGS.MD5): a block's words
+                          are checked where it is installed, but its timing and its neighbours are
+                          the ROM's, so another revision of the game is refused here, not missed */
+  uint64_t imports_hash; /* fnv64 of the helpers' names in table order (aot_import_names) */
+  uint64_t layout_hash;  /* fnv64 of every hot-state member the code addresses off FP, by name,
+                            offset and size, and the struct's size (aot_layout_hash) */
+  uint64_t abi_hash;     /* fnv64 of the register and code-shape constants the code and this core's
+                            linkage share (AOT_ABI_CONSTANTS) */
+  u_int count_per_op, count_per_op_denom_pot; /* the timing the code bakes in, this game's */
+  u_int code_size;     /* the bytes between rt_aot_code and rt_aot_code_end */
+  u_int reserved;      /* padding to the header's 8-byte alignment: written 0, never read */
 };
+_Static_assert(sizeof(struct aot_image_header)==104,"the header's size is part of AOT_VERSION");
 #define AOT_MAGIC 0x31415452 /* "RTA1" */
-#define AOT_VERSION 1
+#define AOT_VERSION 3
+/* Each block's own flags are refused when they hold a bit AOT_FLAGS_KNOWN lacks, and compared with
+ * the compiler state where it is installed (aot_install). */
 
 struct aot_entry { u_int vaddr, reg32, dirty_off, clean_off, ht_replace; };
 struct aot_block {
@@ -62,7 +98,8 @@ struct aot_block {
 };
 
 /* What new_dynarec_aot_configure last chose; aot_mode is its mode from new_dynarec_init on. */
-static struct { int mode; char *image, *log; u_int corrupt; } aot_cfg;
+static struct { int mode; char *image, *log; u_int corrupt; int has_core_uuid; u_char core_uuid[16]; } aot_cfg;
+static void (*aot_report_cb)(int admitted, const char *detail); // new_dynarec_aot_set_report
 
 static struct {
   unsigned long flag_differs, compiled, wraps, installs, misses, lookahead, orphans, emit_skipped, emit_differs;
@@ -77,7 +114,25 @@ static char *aot_strdup(const char *s)
   return d;
 }
 
-void new_dynarec_aot_configure(const char *mode, const char *image, const char *log, u_int corrupt)
+static void aot_release_image(void);
+
+/* 32 hex digits into 16 bytes, dashes skipped: an LC_UUID as otool prints it ("8-4-4-4-12"), or an
+ * MD5 as ROM_SETTINGS holds it; 0 when it is not one */
+static int aot_parse_hex16(const char *s, u_char out[16])
+{
+  int n=0;
+  for(;*s&&n<32;s++) {
+    if(*s=='-') continue;
+    int v=*s>='0'&&*s<='9'?*s-'0':*s>='a'&&*s<='f'?*s-'a'+10:*s>='A'&&*s<='F'?*s-'A'+10:-1;
+    if(v<0) return 0;
+    if(n&1) out[n/2]|=(u_char)v; else out[n/2]=(u_char)(v<<4);
+    n++;
+  }
+  return n==32&&!*s;
+}
+
+void new_dynarec_aot_configure(const char *mode, const char *image, const char *log, u_int corrupt,
+                               const char *core_uuid)
 {
   int m=AOT_OFF;
   if(mode&&*mode) {
@@ -92,10 +147,18 @@ void new_dynarec_aot_configure(const char *mode, const char *image, const char *
     else AOT_CHECK(0,"the mode %s is neither load nor interp, the only ones a build without RT_TRACE has",mode);
 #endif
   }
+  aot_release_image(); // the next game's run opens the image its configuration names
   aot_cfg.mode=m;
   free(aot_cfg.image); aot_cfg.image=aot_strdup(image);
   free(aot_cfg.log); aot_cfg.log=aot_strdup(log);
   aot_cfg.corrupt=corrupt;
+  aot_cfg.has_core_uuid=core_uuid&&*core_uuid;
+  AOT_CHECK(!aot_cfg.has_core_uuid||aot_parse_hex16(core_uuid,aot_cfg.core_uuid),"%s is not a uuid",core_uuid);
+}
+
+void new_dynarec_aot_set_report(void (*report)(int admitted, const char *detail))
+{
+  aot_report_cb=report;
 }
 
 static u_int aot_interp_skew;
@@ -146,15 +209,140 @@ u_int verify_dirty_at(void *stub, u_int vaddr)
   return vaddr;
 }
 
-static void aot_header(struct aot_image_header *h, u_int nblocks, u_int code_size)
+/* This build's LC_UUID (the core dylib's, found from one of its own functions), as the lock's
+ * `uuid` records it; 0 when it has none. */
+static int aot_self_uuid(u_char out[16])
 {
+#ifdef __APPLE__
+  Dl_info info;
+  if(!dladdr((void*)&new_dynarec_aot_configure,&info)||!info.dli_fbase) return 0;
+  const struct mach_header_64 *mh=(const struct mach_header_64 *)info.dli_fbase;
+  if(mh->magic!=MH_MAGIC_64) return 0;
+  const struct load_command *lc=(const struct load_command *)(mh+1);
+  u_int i;
+  for(i=0;i<mh->ncmds;i++,lc=(const struct load_command *)((const char *)lc+lc->cmdsize))
+    if(lc->cmd==LC_UUID) { memcpy(out,((const struct uuid_command *)lc)->uuid,16); return 1; }
+#endif
+  (void)out;
+  return 0;
+}
+
+static uint64_t aot_fnv_add(uint64_t h, const void *p, size_t n)
+{
+  const unsigned char *b=(const unsigned char *)p;
+  while(n--) { h^=*b++; h*=1099511628211ULL; }
+  return h;
+}
+#define AOT_FNV_BASIS 1469598103934665603ULL
+
+/* The names of aot_imports' entries, in order: assem_arm64.c's table, then verify_code_aot. */
+#define JT_NAME(f) #f "\0"
+static const char aot_import_names[]=AOT_JUMP_TABLE(JT_NAME, JT_NAME) "verify_code_aot";
+#undef JT_NAME
+
+/* Every member of struct new_dynarec_hot_state (new_dynarec.h), in declaration order. A member
+ * added there and not here is caught by aot_layout_hash's check where it lands between two listed
+ * ones with room to spare; one that fits in padding is not, so add it here when you add it there. */
+#define AOT_HOT_STATE(X) \
+  X(dynarec_local) X(cycle_count) X(pending_exception) X(pcaddr) X(stop) X(invc_ptr) X(address) \
+  X(rdword) X(wdword) X(wword) X(cp1_fcr0) X(cp1_fcr31) X(regs) X(hi) X(lo) X(cp0_regs) \
+  X(cp0_latch) X(cp1_regs_simple) X(cp1_regs_double) X(cp2_latch) X(rounding_modes) \
+  X(branch_target) X(pc) X(fake_pc) X(rs) X(rt) X(rd) X(ram_offset) X(mini_ht) X(aot_imports) \
+  X(memory_map)
+
+/* The hot state's layout as the code addresses it off FP: each member's name, offset and size,
+ * and the struct's size. *why names a member the list above cannot be complete around (a gap
+ * before it wider than its alignment), or is NULL. */
+static uint64_t aot_layout_hash(const char **why)
+{
+  typedef struct new_dynarec_hot_state hs;
+  uint64_t h=AOT_FNV_BASIS;
+  size_t end=0;
+  *why=NULL;
+#define AOT_MEMBER(m) { \
+    size_t off=offsetof(hs,m), size=sizeof(((hs*)0)->m), align=__alignof__(((hs*)0)->m); \
+    u_int w[2]={(u_int)off,(u_int)size}; \
+    if(!*why&&(off<end||off-end>=align)) *why=#m; \
+    h=aot_fnv_add(h,#m,sizeof #m); h=aot_fnv_add(h,w,sizeof w); end=off+size; }
+  AOT_HOT_STATE(AOT_MEMBER)
+#undef AOT_MEMBER
+  if(!*why&&sizeof(hs)-end>=__alignof__(hs)) *why="(the end of the struct)";
+  u_int total=(u_int)sizeof(hs);
+  return aot_fnv_add(h,&total,sizeof total);
+}
+
+/* The constants the code and this core's hand-written linkage (linkage_arm64.S, the C helpers)
+ * must agree on: which host register holds what across a call, what the allocator keeps out, and
+ * the shape options the assembler was built with. Each is hashed as its name and its expansion as
+ * the preprocessor spells it (a macro this build leaves undefined spells its own name), so a build
+ * that differs in any of them, another platform's included, refuses the image. fake_pc is not
+ * here, nor its precomp_instr layout: no emitted code addresses inside it (assem_arm64.c defines
+ * fp_fake_pc and never uses it), only the core's own C does. */
+#define AOT_XSTR(x) AOT_STR(x)
+#define AOT_STR(x) #x
+#define AOT_ABI_CONSTANTS(X) \
+  X(HOST_REGS) X(HOST_CCREG) X(HOST_BTREG) X(HOST_TEMPREG) X(EXCLUDE_REG) X(EXCLUDE_REG2) \
+  X(EXCLUDE_REG3) X(TRAMPOLINE_REG) X(FP) X(LR) X(CALLER_SAVED_REGS) X(ARG1_REG) X(ARG2_REG) \
+  X(ARG3_REG) X(ARG4_REG) X(NATIVE_64) X(HOST_IMM8) X(RAM_OFFSET) X(USE_MINI_HT)
+#define AOT_ABI_TEXT(c) #c "=" AOT_XSTR(c) "\0"
+static const char aot_abi_text[]=AOT_ABI_CONSTANTS(AOT_ABI_TEXT);
+#undef AOT_ABI_TEXT
+
+/* The header this core writes for an image of nblocks blocks and code_size bytes, for the core
+ * build core_uuid (NULL: this one), and the header a load of one compares against; nonzero when this core
+ * has no LC_UUID (AOT_HEADER_NO_UUID: emit_uuid, and core_uuid when NULL, are then zero), or its ROM no
+ * readable MD5 (AOT_HEADER_NO_MD5: rom_md5 is zero). */
+#define AOT_HEADER_NO_UUID 1
+#define AOT_HEADER_NO_MD5 2
+static int aot_header(struct aot_image_header *h, u_int nblocks, u_int code_size, const u_char *core_uuid)
+{
+  const char *why;
+  memset(h,0,sizeof *h);
   h->magic=AOT_MAGIC; h->version=AOT_VERSION;
-  h->hot_state_size=(u_int)sizeof(struct new_dynarec_hot_state);
-  h->fp_imports=(u_int)fp_aot_imports; h->fp_mmap=(u_int)fp_memory_map;
   h->import_count=(u_int)AOT_IMPORT_COUNT;
+  int missing=aot_self_uuid(h->emit_uuid)?0:AOT_HEADER_NO_UUID;
+  if(core_uuid) memcpy(h->core_uuid,core_uuid,16); else memcpy(h->core_uuid,h->emit_uuid,16);
+  if(!aot_parse_hex16(ROM_SETTINGS.MD5,h->rom_md5)) { memset(h->rom_md5,0,16); missing|=AOT_HEADER_NO_MD5; }
+  h->imports_hash=aot_fnv_add(AOT_FNV_BASIS,aot_import_names,sizeof aot_import_names);
+  h->layout_hash=aot_layout_hash(&why);
+  h->abi_hash=aot_fnv_add(AOT_FNV_BASIS,aot_abi_text,sizeof aot_abi_text);
   h->count_per_op=g_dev.r4300.cp0.count_per_op;
   h->count_per_op_denom_pot=g_dev.r4300.cp0.count_per_op_denom_pot;
   h->nblocks=nblocks; h->code_size=code_size;
+  return missing;
+}
+
+static void aot_format_uuid(const u_char u[16], char out[37])
+{
+  snprintf(out,37,"%02X%02X%02X%02X-%02X%02X-%02X%02X-%02X%02X-%02X%02X%02X%02X%02X%02X",
+    u[0],u[1],u[2],u[3],u[4],u[5],u[6],u[7],u[8],u[9],u[10],u[11],u[12],u[13],u[14],u[15]);
+}
+
+/* Why this core may not load an image with header h (the first field that differs, with both
+ * values), written into why; 0 when it may. */
+static int aot_check_header(const struct aot_image_header *h, char *why, size_t n)
+{
+  struct aot_image_header w;
+  int missing=aot_header(&w,h->nblocks,h->code_size,NULL);
+  char a[37], b[37];
+#define AOT_FIELD(f,fmt) if(h->f!=w.f) { snprintf(why,n,#f ": the image has " fmt ", this core " fmt,h->f,w.f); return 1; }
+#define AOT_BYTES(f,what) if(memcmp(h->f,w.f,16)) { aot_format_uuid(h->f,a); aot_format_uuid(w.f,b); \
+    snprintf(why,n,#f ": the image is for %s %s, this is %s",what,a,b); return 1; }
+  AOT_FIELD(magic,"%#x")
+  AOT_FIELD(version,"%u")
+  if(missing&AOT_HEADER_NO_UUID) { snprintf(why,n,"core_uuid: this core has no LC_UUID to match"); return 1; }
+  AOT_BYTES(core_uuid,"core")
+  if(missing&AOT_HEADER_NO_MD5) { snprintf(why,n,"rom_md5: this game's ROM has no MD5 to match"); return 1; }
+  AOT_BYTES(rom_md5,"the ROM whose MD5 is")
+  AOT_FIELD(import_count,"%u")
+  AOT_FIELD(imports_hash,"%016llx")
+  AOT_FIELD(layout_hash,"%016llx")
+  AOT_FIELD(abi_hash,"%016llx")
+  AOT_FIELD(count_per_op,"%u")
+  AOT_FIELD(count_per_op_denom_pot,"%u")
+#undef AOT_FIELD
+#undef AOT_BYTES
+  return 0;
 }
 
 static void aot_vm_report(const char *when)
@@ -277,10 +465,7 @@ static void aot_note_block_end(u_char *end)
 
 static uint64_t aot_fnv(const void *p, size_t n)
 {
-  uint64_t h=1469598103934665603ULL;
-  const unsigned char *b=(const unsigned char *)p;
-  while(n--) { h^=*b++; h*=1099511628211ULL; }
-  return h;
+  return aot_fnv_add(AOT_FNV_BASIS,p,n);
 }
 
 /* ---- shape: the compile log ---- */
@@ -450,7 +635,14 @@ static void aot_emit_all(void)
     _exit(status);
   }
   struct aot_image_header h;
-  aot_header(&h,aot_out_blocks,(u_int)aot_out_code_len);
+  const char *gap;
+  aot_layout_hash(&gap);
+  AOT_CHECK(!gap,"AOT_HOT_STATE lists no member before %s, which new_dynarec_hot_state has: add it",gap);
+  AOT_CHECK(!aot_header(&h,aot_out_blocks,(u_int)aot_out_code_len,aot_cfg.has_core_uuid?aot_cfg.core_uuid:NULL),
+    "this core has no LC_UUID or the ROM no MD5, so the image could name neither");
+  char cu[37], eu[37], rm[37];
+  aot_format_uuid(h.core_uuid,cu); aot_format_uuid(h.emit_uuid,eu); aot_format_uuid(h.rom_md5,rm);
+  fprintf(stderr,"new_dynarec AOT emit: an image for core %s and the ROM %s, emitted by core %s\n",cu,rm,eu);
   snprintf(path,sizeof path,"%s.code",outp);
   f=fopen(path,"wb"); AOT_CHECK(f,"cannot write %s",path);
   AOT_CHECK(fwrite(aot_out_code,1,aot_out_code_len,f)==aot_out_code_len,"short write %s",path); fclose(f);
@@ -485,46 +677,98 @@ static int aot_block_cmp(const void *a, const void *b)
   return x<y?-1:x>y;
 }
 
-/* The image dylib at path, loaded for this init (aot_release_image drops it at cleanup). */
-static void aot_load_image(const char *path)
+static char *aot_image_path; // the image aot_blocks were read from, while one is open
+
+/* Open the image dylib at path and read its blocks, unless this core may not load it: then
+ * nothing stays open and why says why (aot_check_header's field, or what is malformed). */
+static int aot_open_image(const char *path, char *why, size_t n)
 {
-  AOT_CHECK(path,"load needs an image");
+  if(aot_lib&&aot_image_path&&!strcmp(aot_image_path,path)) { snprintf(why,n,"%s: still open, from before a reset",path); return 0; }
+  aot_release_image();
+  struct aot_image_header h;
+  const u_char *code_end;
+  const u_int *meta, *meta_end, *p;
+  size_t left;
+  u_int i, k;
   aot_lib=dlopen(path,RTLD_NOW|RTLD_LOCAL);
-  AOT_CHECK(aot_lib,"dlopen %s: %s",path,dlerror());
+  if(!aot_lib) { snprintf(why,n,"dlopen: %s",dlerror()); goto refuse; }
   aot_code=(const u_char*)dlsym(aot_lib,"rt_aot_code");
-  const u_int *meta=(const u_int*)dlsym(aot_lib,"rt_aot_meta");
-  const u_int *meta_end=(const u_int*)dlsym(aot_lib,"rt_aot_meta_end");
-  AOT_CHECK(aot_code&&meta&&meta_end,"%s lacks rt_aot_code/rt_aot_meta/rt_aot_meta_end",path);
-  struct aot_image_header want, h;
+  code_end=(const u_char*)dlsym(aot_lib,"rt_aot_code_end");
+  meta=(const u_int*)dlsym(aot_lib,"rt_aot_meta");
+  meta_end=(const u_int*)dlsym(aot_lib,"rt_aot_meta_end");
+  if(!aot_code||!code_end||!meta||!meta_end||code_end<aot_code||meta_end<meta) {
+    snprintf(why,n,"symbols: no rt_aot_code, rt_aot_code_end, rt_aot_meta or rt_aot_meta_end in order");
+    goto refuse;
+  }
+  if((size_t)(meta_end-meta)*4<sizeof h) { snprintf(why,n,"meta: shorter than a header"); goto refuse; }
   memcpy(&h,meta,sizeof h);
-  aot_header(&want,h.nblocks,h.code_size);
-  AOT_CHECK(!memcmp(&h,&want,sizeof h),
-    "%s was emitted for another core (magic %x/%x v%u/%u, hot state %u/%u, imports at %u/%u, memory_map at %u/%u, %u/%u imports, count_per_op %u/%u, denom %u/%u)",
-    path,h.magic,want.magic,h.version,want.version,h.hot_state_size,want.hot_state_size,h.fp_imports,want.fp_imports,
-    h.fp_mmap,want.fp_mmap,h.import_count,want.import_count,h.count_per_op,want.count_per_op,h.count_per_op_denom_pot,want.count_per_op_denom_pot);
-  const u_int *p=meta+sizeof h/4;
-  aot_nblocks=h.nblocks;
-  aot_blocks=(struct aot_block*)calloc(aot_nblocks,sizeof *aot_blocks);
+  if(aot_check_header(&h,why,n)) goto refuse;
+  if(h.code_size!=(size_t)(code_end-aot_code)) {
+    snprintf(why,n,"code_size: the header says %u bytes, the image holds %ld",h.code_size,(long)(code_end-aot_code));
+    goto refuse;
+  }
+  p=meta+sizeof h/4;
+  left=(size_t)(meta_end-p);
+  if(h.nblocks>left/7) { snprintf(why,n,"meta: %u blocks cannot fit in %zu words",h.nblocks,left); goto refuse; } // 7: a block's least
+  aot_blocks=(struct aot_block*)calloc(h.nblocks?h.nblocks:1,sizeof *aot_blocks);
   AOT_CHECK(aot_blocks,"out of memory");
-  u_int i;
-  for(i=0;i<aot_nblocks;i++) {
+  for(i=0;i<h.nblocks;i++) {
     struct aot_block *b=&aot_blocks[i];
-    AOT_CHECK(p+6<=meta_end,"%s: meta ends inside block %u",path,i);
+    left=(size_t)(meta_end-p);
+    if(left<6) { snprintf(why,n,"meta: it ends inside block %u",i); goto refuse; }
     b->addr=p[0]; b->slen=p[1]; b->code_off=p[2]; b->code_len=p[3]; b->nentries=p[4]; b->flags=p[5];
+    if(b->slen>=MAXBLOCK||b->nentries>MAXBLOCK+1) { snprintf(why,n,"meta: block %u has %u words and %u entries",i,b->slen,b->nentries); goto refuse; }
+    if(left<6+(size_t)b->slen+1+5*(size_t)b->nentries) { snprintf(why,n,"meta: block %u overruns the meta",i); goto refuse; }
+    // the code bound without wraparound: code_off+code_len can wrap a u_int
+    if(b->code_off>h.code_size||b->code_len>h.code_size-b->code_off) { snprintf(why,n,"meta: block %u overruns the code",i); goto refuse; }
+    if(b->flags&~AOT_FLAGS_KNOWN) { snprintf(why,n,"block_flags: block %u (%08x) has flags %#x, this core knows %#x",i,b->addr,b->flags,AOT_FLAGS_KNOWN); goto refuse; }
     b->words=p+6;
     b->entries=(const struct aot_entry*)(p+6+b->slen+1);
+    for(k=0;k<b->nentries;k++)
+      if(b->entries[k].dirty_off>=b->code_len||b->entries[k].clean_off>=b->code_len) {
+        snprintf(why,n,"meta: block %u's entry %u points outside its code",i,k);
+        goto refuse;
+      }
     p+=6+b->slen+1+5*b->nentries;
-    AOT_CHECK(p<=meta_end&&b->code_off+b->code_len<=h.code_size,"%s: block %u overruns the image",path,i);
   }
-  AOT_CHECK(p==meta_end,"%s: %ld words of meta after the last block",path,(long)(meta_end-p));
+  if(p!=meta_end) { snprintf(why,n,"meta: %ld words after the last block",(long)(meta_end-p)); goto refuse; }
+  aot_nblocks=h.nblocks;
   qsort(aot_blocks,aot_nblocks,sizeof *aot_blocks,aot_block_cmp);
-  fprintf(stderr,"new_dynarec AOT load: %s: %u blocks, %u bytes of code at %p\n",path,aot_nblocks,h.code_size,(void*)aot_code);
+  aot_image_path=aot_strdup(path);
+  {
+    char cu[37];
+    aot_format_uuid(h.emit_uuid,cu);
+    snprintf(why,n,"%s: %u blocks, %u bytes of code, emitted by core %s",path,aot_nblocks,h.code_size,cu);
+    fprintf(stderr,"new_dynarec AOT load: %s at %p\n",why,(void*)aot_code);
+  }
+  return 0;
+refuse:
+  aot_release_image();
+  return 1;
 }
 
 static void aot_release_image(void)
 {
   free(aot_blocks); aot_blocks=NULL; aot_nblocks=0; aot_code=NULL;
+  free(aot_image_path); aot_image_path=NULL;
   if(aot_lib) { dlclose(aot_lib); aot_lib=NULL; }
+}
+
+int new_dynarec_aot_admits(void)
+{
+  char why[512];
+  if(aot_cfg.mode==AOT_OFF) {
+    if(AOT_CAN_JIT) return 1;
+    fprintf(stderr,"new_dynarec AOT: this core runs the dynarec only from an image, and none is configured: the cached interpreter runs\n");
+    return 0;
+  }
+  if(!AOT_IMAGE_ONLY(aot_cfg.mode)&&aot_cfg.mode!=AOT_HYBRID) return 1;
+  int admitted=0;
+  if(!aot_cfg.image) snprintf(why,sizeof why,"no image is configured");
+  else admitted=!aot_open_image(aot_cfg.image,why,sizeof why);
+  if(!admitted) fprintf(stderr,"new_dynarec AOT: refused %s: %s; the cached interpreter runs instead\n",aot_cfg.image?aot_cfg.image:"(none)",why);
+  if(aot_report_cb) aot_report_cb(admitted,why); // on admission, why is the load's own line
+  return admitted;
 }
 
 static void aot_init(void)
@@ -534,15 +778,19 @@ static void aot_init(void)
   if(aot_mode==AOT_SHAPE||aot_mode==AOT_HYBRID) aot_open_log(aot_cfg.log);
   if(aot_mode==AOT_EMIT) aot_emit_all();
 #endif
-  if(AOT_IMAGE_ONLY(aot_mode)||aot_mode==AOT_HYBRID) { aot_load_image(aot_cfg.image); aot_vm_report("image loaded"); }
+  if(AOT_IMAGE_ONLY(aot_mode)||aot_mode==AOT_HYBRID) {
+    char why[512];
+    // new_dynarec_aot_admits opened it, and a reset finds it open still
+    AOT_CHECK(!aot_open_image(aot_cfg.image,why,sizeof why),"%s: %s",aot_cfg.image,why);
+    aot_vm_report("image loaded");
+  }
 }
 
-/* new_dynarec_cleanup's: the run's report, then the image released, so the next init (a reset,
- * or another game's load) loads the image its configuration names. */
+/* new_dynarec_cleanup's: the run's report. The image stays open for a reset's init; the next
+ * new_dynarec_aot_configure (another game's load) releases it. */
 static void aot_cleanup(void)
 {
   aot_report("end of run");
-  aot_release_image();
   aot_interp_release();
   memset(&aot_stats,0,sizeof aot_stats);
 }
