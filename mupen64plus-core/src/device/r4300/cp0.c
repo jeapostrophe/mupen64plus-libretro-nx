@@ -150,6 +150,13 @@ int check_cop2_unusable(struct r4300_core* r4300)
     return 0;
 }
 
+FILE *lane_upd_log(void) /* LANE-ONLY DIAGNOSTIC (lane hh33c) */
+{
+  static FILE *log; static int init;
+  if(!init) { const char *p=getenv("M64P_UPD_LOG"); init=1; if(p) log=fopen(p,"w"); }
+  return log;
+}
+
 void cp0_update_count(struct r4300_core* r4300)
 {
     struct cp0* cp0 = &r4300->cp0;
@@ -174,8 +181,8 @@ void cp0_update_count(struct r4300_core* r4300)
         cp0_regs[CP0_COUNT_REG] = *r4300_cp0_next_interrupt(cp0) + *r4300_cp0_cycle_count(cp0);
         { /* LANE-ONLY DIAGNOSTIC (retro-trainer lane hh33c): M64P_UPD_LOG=<path> logs every Count
              update: Count and pcaddr */
-          static FILE *log; static int init;
-          if(!init) { const char *p=getenv("M64P_UPD_LOG"); init=1; if(p) log=fopen(p,"w"); }
+          FILE *lane_upd_log(void);
+          FILE *log=lane_upd_log();
           if(log) fprintf(log,"%08x %08x %08x %d\n",cp0_regs[CP0_COUNT_REG],r4300->new_dynarec_hot_state.pcaddr,*r4300_cp0_next_interrupt(cp0),*r4300_cp0_cycle_count(cp0));
         }
     }

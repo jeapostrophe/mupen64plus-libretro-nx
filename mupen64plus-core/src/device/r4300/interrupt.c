@@ -1,3 +1,4 @@
+#include <stdio.h>
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
  *   Mupen64plus - interrupt.c                                              *
  *   Mupen64Plus homepage: https://mupen64plus.org/                        *
@@ -588,6 +589,11 @@ void gen_interrupt(struct r4300_core* r4300)
         return;
     }
 
+    { /* LANE-ONLY DIAGNOSTIC (lane hh33c): each event gen_interrupt takes, into M64P_UPD_LOG */
+      FILE *lane_upd_log(void);
+      FILE *log=lane_upd_log();
+      if(log) fprintf(log,"G type %d count %08x pc %08x cc %d\n",(int)r4300->cp0.q.first->data.type,cp0_regs[CP0_COUNT_REG],r4300->new_dynarec_hot_state.pcaddr,*cp0_cycle_count);
+    }
     switch (r4300->cp0.q.first->data.type)
     {
         case VI_INT:
