@@ -736,6 +736,14 @@ static int aot_interp_one(u_int pc, u_int iw, int k, int ds)
   }
   st->fake_pc.addr=pc;
   r4300_decode(&st->fake_pc,r4300,idec,iw,0,NULL);
+  { /* LANE-ONLY DIAGNOSTIC (lane hh33c): M64P_WATCH=<hex addr> logs interpreted stores near it */
+    static int init; static u_int watch;
+    if(!init) { const char *w=getenv("M64P_WATCH"); init=1; watch=w?(u_int)strtoul(w,NULL,16):0; }
+    if(watch&&aot_is_store(idec->opcode)) {
+      u_int ea=(u_int)(int32_t)r4300_regs(r4300)[(iw>>21)&0x1f]+(u_int)(int32_t)(int16_t)iw;
+      if(ea+8>watch&&ea<watch+16) fprintf(stderr,"WATCH pc %08x iw %08x ea %08x rt %016llx\n",pc,iw,ea,(unsigned long long)r4300_regs(r4300)[(iw>>16)&0x1f]);
+    }
+  }
   int count=cpo*(k+(idec->opcode!=R4300_OP_MFC0)); // MFC0_new's count, else a stub's
   int before=st->cycle_count;
   st->pcaddr=pc;
