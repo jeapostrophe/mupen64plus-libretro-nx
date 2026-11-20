@@ -23,6 +23,8 @@
 #include <string.h>
 
 #include "cp0.h"
+#include <stdio.h>
+#include <stdlib.h>
 #include "r4300_core.h"
 #include "new_dynarec/new_dynarec.h"
 #include "recomp.h"
@@ -168,7 +170,15 @@ void cp0_update_count(struct r4300_core* r4300)
 #ifdef NEW_DYNAREC
     }
     else
+    {
         cp0_regs[CP0_COUNT_REG] = *r4300_cp0_next_interrupt(cp0) + *r4300_cp0_cycle_count(cp0);
+        { /* LANE-ONLY DIAGNOSTIC (retro-trainer lane hh33c): M64P_UPD_LOG=<path> logs every Count
+             update: Count and pcaddr */
+          static FILE *log; static int init;
+          if(!init) { const char *p=getenv("M64P_UPD_LOG"); init=1; if(p) log=fopen(p,"w"); }
+          if(log) fprintf(log,"%08x %08x\n",cp0_regs[CP0_COUNT_REG],r4300->new_dynarec_hot_state.pcaddr);
+        }
+    }
 #endif
 
 #ifdef COMPARE_CORE
